@@ -1,8 +1,10 @@
 use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::{Gpu, PhysicalDevice},
+    device::Device,
+    format::Format,
     queue::family::QueueFamily,
-    window::Surface,
+    window::{Extent2D, PresentMode, Surface, SwapchainConfig},
     Features, Instance,
 };
 use winit::window::Window;
@@ -13,6 +15,9 @@ pub struct HalState {
 
 const VERSION: u32 = 1;
 const WINDOW_NAME: &str = "Learn Gfx";
+// Matches mailbox presentation, which
+// uses three images for vsync
+const FRAMES_IN_FLIGHT: usize = 3;
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
@@ -21,7 +26,7 @@ impl HalState {
             back::Instance::create(WINDOW_NAME, VERSION).map_err(|_| "Unsupported backend")?;
 
         // Window drawing surface
-        let surface = unsafe { instance.create_surface(window) }
+        let mut surface = unsafe { instance.create_surface(window) }
             .map_err(|_| "Could not get drawing surface")?;
 
         // Supports our backend, probably a GPU
@@ -73,6 +78,22 @@ impl HalState {
 
             (device, queue_group)
         };
+
+        let content_size = window.inner_size();
+        let content_size = Extent2D {
+            width: content_size.width,
+            height: content_size.height,
+        };
+        let capabilities = surface.capabilities(&adapter.physical_device);
+        let swapchain_config =
+            SwapchainConfig::from_caps(&capabilities, Format::Rgba32Sfloat, content_size)
+                .with_present_mode(PresentMode::MAILBOX);
+
+        // Swapchain manages a collection of images
+        // Backbuffer contains handles to swapchain images
+        let (swapchain, backbuffer) =
+            unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
+                .map_err(|_| "Could not create swapchain")?;
 
         Ok(Self { instance })
     }

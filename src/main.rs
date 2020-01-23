@@ -1,18 +1,23 @@
+mod hal_state;
+use hal_state::HalState;
+
 use simple_logger;
-use gfx_backend_vulkan as back;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 
-fn main() {
+fn main() -> Result<(), &'static str> {
+    simple_logger::init().map_err(|_| "Could not start logger")?;
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
 
+    let state = HalState::new(&window);
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -20,5 +25,5 @@ fn main() {
             } if window_id == window.id() => *control_flow = ControlFlow::Exit,
             _ => (),
         }
-    });
+    })
 }

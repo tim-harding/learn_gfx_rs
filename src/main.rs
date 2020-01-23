@@ -1,31 +1,24 @@
-pub mod window;
-
-use window::GfxWindow;
-use winit::{Event, WindowEvent};
 use simple_logger;
-
-#[cfg(feature = "dx12")]
-use gfx_backend_dx12 as back;
-#[cfg(feature = "metal")]
-use gfx_backend_metal as back;
-#[cfg(feature = "vulkan")]
 use gfx_backend_vulkan as back;
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
 
 fn main() {
-    match simple_logger::init() {
-        Err(_) => { println!("Couldn't start logger.") },
-        _ => { },
-    };
-    let mut window = GfxWindow::new();
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
 
-    let mut running = true;
-    while running {
-        window.events_loop.poll_events(|event| match event {
-            Event::WindowEvent { 
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
-                ..
-            } => running = false,
+                window_id,
+            } if window_id == window.id() => *control_flow = ControlFlow::Exit,
             _ => (),
-        });
-    }
+        }
+    });
 }

@@ -95,6 +95,29 @@ impl HalState {
             unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
                 .map_err(|_| "Could not create swapchain")?;
 
+        let make_semaphore = || {
+            device
+                .create_semaphore()
+                .map_err(|_| "Could not create semaphore")
+        };
+
+        let image_available_semaphores = flight(make_semaphore);
+        let render_finished_semaphores = flight(make_semaphore);
+        let in_flight_fences = flight(|| {
+            device
+                .create_fence(true)
+                .map_err(|_| "Could not create fence")
+        })?;
+
         Ok(Self { instance })
     }
+}
+
+fn flight<T, F>(cb: F) -> Result<Vec<T>, &'static str>
+where
+    F: Fn() -> Result<T, &'static str>,
+{
+    (0..FRAMES_IN_FLIGHT)
+        .map(|_| cb())
+        .collect::<Result<Vec<_>, _>>()
 }

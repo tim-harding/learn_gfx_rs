@@ -9,14 +9,15 @@ use gfx_hal::{
     image::{Extent, SubresourceRange, ViewKind},
     pass::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
-        SubpassDesc,
+        SubpassDesc, Subpass
     },
     pool::{CommandPool, CommandPoolCreateFlags},
     // Pipeline state objects
     pso::{
-        AttributeDesc, BakedStates, BlendDesc, BlendOp, BlendState, ColorBlendDesc, ColorMask,
-        DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint, GraphicsShaderSet,
-        InputAssemblerDesc, LogicOp, PipelineStage, Primitive, Rasterizer, Rect, ShaderStageFlags,
+        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendOp, BlendState, ColorBlendDesc,
+        ColorMask, DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint,
+        GraphicsPipelineDesc, GraphicsShaderSet, InputAssemblerDesc, LogicOp,
+        PipelineCreationFlags, PipelineStage, Primitive, Rasterizer, Rect, ShaderStageFlags,
         Specialization, VertexBufferDesc, VertexInputRate, Viewport,
     },
     queue::{
@@ -270,7 +271,7 @@ impl HalState {
         let vert = compile_shader(VERT_PATH, &mut compiler, &device, ShaderKind::Vertex)?;
         let frag = compile_shader(FRAG_PATH, &mut compiler, &device, ShaderKind::Fragment)?;
 
-        let program = GraphicsShaderSet::<back::Backend> {
+        let shaders = GraphicsShaderSet::<back::Backend> {
             vertex: EntryPoint {
                 entry: "main",
                 module: &vert,
@@ -287,21 +288,21 @@ impl HalState {
             }),
         };
 
-        let input_assembler_desc = InputAssemblerDesc {
+        let input_assembler = InputAssemblerDesc {
             primitive: Primitive::TriangleList,
             with_adjacency: false,
             restart_index: None,
         };
 
-        let vert_buffer_desc = VertexBufferDesc {
+        let vertex_buffers = vec![VertexBufferDesc {
             // Not the location listed on the shader,
             // this is just a unique id for the buffer
             binding: 0,
             stride: (mem::size_of::<f32>() * 2) as u32,
             rate: VertexInputRate::Vertex,
-        };
+        }];
 
-        let attr_desc = vec![AttributeDesc {
+        let attributes = vec![AttributeDesc {
             // This is the attribute location in the shader
             location: 0,
             // Matches vertex buffer description
@@ -313,16 +314,14 @@ impl HalState {
             },
         }];
 
-        // Rasterizer::FILL
-
         // No depth test for now
-        let stencil = DepthStencilDesc {
+        let depth_stencil = DepthStencilDesc {
             depth: None,
             depth_bounds: false,
             stencil: None,
         };
 
-        let blend = BlendDesc {
+        let blender = BlendDesc {
             logic_op: Some(LogicOp::Copy),
             targets: vec![ColorBlendDesc {
                 mask: ColorMask::ALL,
@@ -332,7 +331,7 @@ impl HalState {
 
         let render_area = content_size.to_extent().rect();
         // Baked-in pipeline attributes
-        let baked = BakedStates {
+        let baked_states = BakedStates {
             viewport: Some(Viewport {
                 rect: render_area,
                 depth: 0.0..1.0,
@@ -356,6 +355,28 @@ impl HalState {
         let layout =
             unsafe { device.create_pipeline_layout(&descriptor_set_layouts, push_constants) }
                 .map_err(|_| "Failed to create a pipeline layout")?;
+
+        let pipeline_desc = GraphicsPipelineDesc {
+            shaders,
+            rasterizer: Rasterizer::FILL,
+            vertex_buffers,
+            attributes,
+            input_assembler,
+            blender,
+            depth_stencil,
+            multisampling: None,
+            baked_states,
+            layout: &layout,
+            subpass: Subpass {
+                index: 0,
+                main_pass: &render_pass,
+            },
+            flags: PipelineCreationFlags::empty(),
+            parent: BasePipeline::None,
+        };
+
+        let pipeline = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
+            .map_err(|_| "Failed to create graphics pipeline")?;
 
         Ok(Self {
             current_frame: 0,

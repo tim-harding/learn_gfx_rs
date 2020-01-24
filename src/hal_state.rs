@@ -4,7 +4,7 @@ use gfx_hal::{
     adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
     command::{
-        ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, CommandBufferInheritanceInfo,
+        ClearColor, ClearValue, CommandBuffer, CommandBufferFlags,
         Level, SubpassContents,
     },
     device::Device,
@@ -16,7 +16,6 @@ use gfx_hal::{
     },
     pool::{CommandPool, CommandPoolCreateFlags},
     pso::{PipelineStage, Rect},
-    query::{ControlFlags, PipelineStatistic},
     queue::{
         family::{QueueFamily, QueueGroup},
         CommandQueue, Submission,
@@ -63,7 +62,7 @@ const WINDOW_NAME: &str = "Learn Gfx";
 // uses three images for vsync
 const FRAMES_IN_FLIGHT: usize = 3;
 
-const FORMAT: Format = Format::Rgba32Sfloat;
+const FORMAT: Format = Format::Rgba8Srgb;
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
@@ -298,22 +297,12 @@ impl HalState {
         unsafe { self.device.reset_fence(flight_fence) }
             .map_err(|_| "Failed to reset the fence")?;
 
+        let buffer = &mut self.command_buffers[image_i];
+        let clear_values = [ClearValue {
+            color: ClearColor { float32: color },
+        }];
         unsafe {
-            let buffer = &mut self.command_buffers[image_i];
-            let clear_values = [ClearValue {
-                color: ClearColor {
-                    float32: [0.2, 0.5, 0.8, 1.0],
-                },
-            }];
-            let inheritance_info = CommandBufferInheritanceInfo {
-                subpass: None,
-                framebuffer: None,
-                occlusion_query_enable: false,
-                occlusion_query_flags: ControlFlags::empty(),
-                // Not sure what this does. Logging?
-                pipeline_statistics: PipelineStatistic::empty(),
-            };
-            buffer.begin(CommandBufferFlags::ONE_TIME_SUBMIT, inheritance_info);
+            buffer.begin_primary(CommandBufferFlags::EMPTY);
             buffer.begin_render_pass(
                 &self.render_pass,
                 &self.framebuffers[image_i],
@@ -342,13 +331,13 @@ impl HalState {
         }
         // Discard suboptimal warning
         .map(|_| ())
-        .map_err(|_| "Failed to present into the swapchain!")
+        .map_err(|_| "Failed to present into the swapchain")
     }
 }
 
 impl Drop for HalState {
     fn drop(&mut self) {
-        self.device.wait_idle();
+        let _ = self.device.wait_idle();
 
         // Don't need to destroy command buffers,
         // they are freed with their pool

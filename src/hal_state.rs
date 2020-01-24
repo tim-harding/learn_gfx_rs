@@ -3,6 +3,10 @@ use gfx_hal::{
     adapter::{Gpu, PhysicalDevice},
     device::Device,
     format::Format,
+    pass::{
+        Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
+        SubpassDesc,
+    },
     queue::family::QueueFamily,
     window::{Extent2D, PresentMode, Surface, SwapchainConfig},
     Features, Instance,
@@ -13,11 +17,15 @@ pub struct HalState {
     instance: back::Instance,
 }
 
+// Should move this where Winit can use it too
 const VERSION: u32 = 1;
 const WINDOW_NAME: &str = "Learn Gfx";
+
 // Matches mailbox presentation, which
 // uses three images for vsync
 const FRAMES_IN_FLIGHT: usize = 3;
+
+const FORMAT: Format = Format::Rgba32Sfloat;
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
@@ -85,9 +93,8 @@ impl HalState {
             height: content_size.height,
         };
         let capabilities = surface.capabilities(&adapter.physical_device);
-        let swapchain_config =
-            SwapchainConfig::from_caps(&capabilities, Format::Rgba32Sfloat, content_size)
-                .with_present_mode(PresentMode::MAILBOX);
+        let swapchain_config = SwapchainConfig::from_caps(&capabilities, FORMAT, content_size)
+            .with_present_mode(PresentMode::MAILBOX);
 
         // Swapchain manages a collection of images
         // Backbuffer contains handles to swapchain images
@@ -95,19 +102,52 @@ impl HalState {
             unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
                 .map_err(|_| "Could not create swapchain")?;
 
+        // Semaphores provide GPU-side syncronization
         let make_semaphore = || {
             device
                 .create_semaphore()
                 .map_err(|_| "Could not create semaphore")
         };
 
-        let image_available_semaphores = flight(make_semaphore);
-        let render_finished_semaphores = flight(make_semaphore);
+        // Image available flagged when...
+        let image_available_semaphores = flight(make_semaphore)?;
+
+        // Render finished flagged when...
+        let render_finished_semaphores = flight(make_semaphore)?;
+
+        // In flight fences flagged when...
         let in_flight_fences = flight(|| {
             device
                 .create_fence(true)
                 .map_err(|_| "Could not create fence")
         })?;
+
+        // Essentially a render target image, but which
+        // may also be attached as an input
+        let attachment = Attachment {
+            format: Some(FORMAT),
+            // Don't have MSAA yet anyway
+            samples: 1,
+            // Clear the render target to the clear color and preserve the result
+            ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
+            stencil_ops: AttachmentOps::DONT_CARE,
+            // Begin uninitialized, end ready to present
+            layouts: AttachmentLayout::Undefined..AttachmentLayout::Present,
+        };
+
+        let subpass = SubpassDesc {
+            // Our color attachment will use ID zero
+            colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
+            depth_stencil: None,
+            inputs: &[],
+            // For MSAA
+            resolves: &[],
+            // Attachments not used by subpass but which must preserved
+            preserves: &[],
+        };
+
+        unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
+            .map_err(|_| "Could not create render pass")?;
 
         Ok(Self { instance })
     }

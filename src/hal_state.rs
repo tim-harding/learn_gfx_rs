@@ -12,24 +12,28 @@ use gfx_hal::{
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    pso::{PipelineStage, Rect},
+    // Pipeline state objects
+    pso::{
+        AttributeDesc, BakedStates, BlendDesc, BlendOp, BlendState, ColorBlendDesc, ColorMask,
+        DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint, GraphicsShaderSet,
+        InputAssemblerDesc, LogicOp, PipelineStage, Primitive, Rasterizer, Rect, ShaderStageFlags,
+        Specialization, VertexBufferDesc, VertexInputRate, Viewport,
+    },
     queue::{
         family::{QueueFamily, QueueGroup},
         CommandQueue, Submission,
     },
-    window::{
-        Extent2D,
-        PresentMode,
-        // Required import but compiler still complains.
-        // Can't find a way of silencing it.
-        Surface,
-        Swapchain,
-        SwapchainConfig,
-    },
-    Backend, Features, Instance,
+    window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
+    Backend,
+    Features,
+    Instance,
 };
 use shaderc::{Compiler, ShaderKind};
-use std::{mem::ManuallyDrop, ops::Drop, ptr};
+use std::{
+    mem::{self, ManuallyDrop},
+    ops::{Drop, Range},
+    ptr,
+};
 use winit::window::Window;
 
 pub struct HalState {
@@ -59,8 +63,8 @@ pub struct HalState {
     freed: bool,
 }
 
-const VERT_SOURCE_FILE: &str = "shaders/vert.glsl";
-const FRAG_SOURCE_FILE: &str = "shaders/frag.glsl";
+const VERT_PATH: &str = "shaders/vert.glsl";
+const FRAG_PATH: &str = "shaders/frag.glsl";
 
 // Should move this where Winit can use it too
 const VERSION: u32 = 1;
@@ -259,16 +263,99 @@ impl HalState {
             .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
             .collect::<Vec<_>>();
 
-        let render_area = Rect {
-            x: 0,
-            y: 0,
-            w: content_size.width as i16,
-            h: content_size.height as i16,
+        let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
+
+        // These can be destroyed at the end of the pipeline creation,
+        // rather than at the end of HalState's lifetime.
+        let vert = compile_shader(VERT_PATH, &mut compiler, &device, ShaderKind::Vertex)?;
+        let frag = compile_shader(FRAG_PATH, &mut compiler, &device, ShaderKind::Fragment)?;
+
+        let program = GraphicsShaderSet::<back::Backend> {
+            vertex: EntryPoint {
+                entry: "main",
+                module: &vert,
+                // Not sure what this is used for
+                specialization: Specialization::EMPTY,
+            },
+            domain: None,
+            geometry: None,
+            hull: None,
+            fragment: Some(EntryPoint {
+                entry: "main",
+                module: &frag,
+                specialization: Specialization::EMPTY,
+            }),
         };
 
-        let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
-        let vert = compile_shader(VERT_SOURCE_FILE, &mut compiler, &device, ShaderKind::Vertex);
-        let frag = compile_shader(FRAG_SOURCE_FILE, &mut compiler, &device, ShaderKind::Fragment);
+        let input_assembler_desc = InputAssemblerDesc {
+            primitive: Primitive::TriangleList,
+            with_adjacency: false,
+            restart_index: None,
+        };
+
+        let vert_buffer_desc = VertexBufferDesc {
+            // Not the location listed on the shader,
+            // this is just a unique id for the buffer
+            binding: 0,
+            stride: (mem::size_of::<f32>() * 2) as u32,
+            rate: VertexInputRate::Vertex,
+        };
+
+        let attr_desc = vec![AttributeDesc {
+            // This is the attribute location in the shader
+            location: 0,
+            // Matches vertex buffer description
+            binding: 0,
+            element: Element {
+                // Float vec2
+                format: Format::Rg32Sfloat,
+                offset: 0,
+            },
+        }];
+
+        // Rasterizer::FILL
+
+        // No depth test for now
+        let stencil = DepthStencilDesc {
+            depth: None,
+            depth_bounds: false,
+            stencil: None,
+        };
+
+        let blend = BlendDesc {
+            logic_op: Some(LogicOp::Copy),
+            targets: vec![ColorBlendDesc {
+                mask: ColorMask::ALL,
+                blend: Some(BlendState::ADD),
+            }],
+        };
+
+        let render_area = content_size.to_extent().rect();
+        // Baked-in pipeline attributes
+        let baked = BakedStates {
+            viewport: Some(Viewport {
+                rect: render_area,
+                depth: 0.0..1.0,
+            }),
+            scissor: Some(render_area),
+            blend_color: None,
+            depth_bounds: None,
+        };
+
+        // This machinery is only used when graphics pipeline data
+        // comes from somewhere other than the vertex buffer.
+        // We still have to explicitly declare all these empty
+        // bits and bobs.
+        let bindings = Vec::<DescriptorSetLayoutBinding>::new();
+        let immutable_samplers = Vec::<<back::Backend as Backend>::Sampler>::new();
+        let descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout> = vec![
+            unsafe { device.create_descriptor_set_layout(bindings, immutable_samplers) }
+                .map_err(|_| "Failed to create a descriptor set layout")?,
+        ];
+        let push_constants = Vec::<(ShaderStageFlags, Range<u32>)>::new();
+        let layout =
+            unsafe { device.create_pipeline_layout(&descriptor_set_layouts, push_constants) }
+                .map_err(|_| "Failed to create a pipeline layout")?;
 
         Ok(Self {
             current_frame: 0,
@@ -425,8 +512,7 @@ fn compile_shader(
     device: &back::Device,
     kind: ShaderKind,
 ) -> Result<<back::Backend as Backend>::ShaderModule, &'static str> {
-    let src =
-        std::fs::read_to_string(src_file).map_err(|_| "Could not read shader source file")?;
+    let src = std::fs::read_to_string(src_file).map_err(|_| "Could not read shader source file")?;
     let spirv = compiler
         .compile_into_spirv(&src, kind, src_file, "main", None)
         .map_err(|e| {

@@ -3,10 +3,7 @@ use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
-    command::{
-        ClearColor, ClearValue, CommandBuffer, CommandBufferFlags,
-        Level, SubpassContents,
-    },
+    command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
@@ -52,6 +49,13 @@ pub struct HalState {
     adapter: Adapter<back::Backend>,
     surface: <back::Backend as Backend>::Surface,
     instance: ManuallyDrop<back::Instance>,
+
+    // It would be preferrable to use drop symantics exclusively,
+    // but I cannot drop HalState once it has been moved into
+    // the Winit main loop closure. This is necessary for
+    // reallocating the swapchain on window resize without dropping while
+    // still preserving drop symantics that don't lead to double frees.
+    freed: bool,
 }
 
 // Should move this where Winit can use it too
@@ -66,6 +70,10 @@ const FORMAT: Format = Format::Rgba8Srgb;
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
+        Self::init(window)
+    }
+
+    pub fn init(window: &Window) -> Result<Self, &'static str> {
         // Backend handle
         let instance =
             back::Instance::create(WINDOW_NAME, VERSION).map_err(|_| "Unsupported backend")?;
@@ -114,7 +122,7 @@ impl HalState {
             .find(|qg| qg.family == queue_family.id())
             .ok_or("Matching queue group not found")?;
 
-        if queue_group.queues.len() > 0 {
+        if !queue_group.queues.is_empty() {
             Ok(())
         } else {
             Err("Queue group contains no command queues")
@@ -272,10 +280,18 @@ impl HalState {
             adapter,
             surface,
             instance: ManuallyDrop::new(instance),
+
+            freed: false,
         })
     }
 
     pub fn draw_clear_frame(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
+        if self.freed {
+            Err("Use of freed Gfx state")
+        } else {
+            Ok(())
+        }?;
+
         let image_available = &self.image_available_semaphores[self.current_frame];
         let render_finished = &self.render_finished_semaphores[self.current_frame];
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
@@ -287,7 +303,7 @@ impl HalState {
         .map_err(|_| "Failed to acquire an image from the swapchain")?;
 
         let image_i = image_i as usize;
-        if let Some(_) = suboptimal {
+        if suboptimal.is_some() {
             println!("Swapchain no longer matches drawing surface");
         }
 
@@ -313,7 +329,7 @@ impl HalState {
             buffer.finish();
         }
 
-        let command_buffers = &self.command_buffers.iter().nth(image_i);
+        let command_buffers = &self.command_buffers.get(image_i);
         let wait_semaphores: ArrayVec<[_; 1]> =
             [(image_available, PipelineStage::COLOR_ATTACHMENT_OUTPUT)].into();
         let signal_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
@@ -333,10 +349,13 @@ impl HalState {
         .map(|_| ())
         .map_err(|_| "Failed to present into the swapchain")
     }
-}
 
-impl Drop for HalState {
-    fn drop(&mut self) {
+    pub fn free(&mut self) {
+        if self.freed {
+            return;
+        }
+        self.freed = true;
+
         let _ = self.device.wait_idle();
 
         // Don't need to destroy command buffers,
@@ -364,16 +383,22 @@ impl Drop for HalState {
 
         unsafe {
             self.device
-                .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&mut self.command_pool)));
+                .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&self.command_pool)));
             self.device
-                .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&mut self.render_pass)));
+                .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&self.render_pass)));
             self.device
-                .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&mut self.swapchain)));
+                .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&self.swapchain)));
 
             ManuallyDrop::drop(&mut self.queue_group);
             ManuallyDrop::drop(&mut self.device);
             ManuallyDrop::drop(&mut self.instance);
         }
+    }
+}
+
+impl Drop for HalState {
+    fn drop(&mut self) {
+        self.free()
     }
 }
 

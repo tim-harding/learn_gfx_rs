@@ -9,5 +9,5 @@ gfx-hal = "^0"
 gfx-backend-vulkan = "^0"
 winit = "^0"
 log = "^0"
-simple_logger = "^1"
+fern = { version = "^0", features = ["colored"] }
 arrayvec = "^0"

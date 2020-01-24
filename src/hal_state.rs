@@ -1,17 +1,21 @@
 use gfx_backend_vulkan as back;
 use gfx_hal::{
+    adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
-    command::Level,
+    command::{CommandBuffer, Level},
     device::Device,
-    format::Format,
-    format::{Aspects, Swizzle},
+    format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
     pass::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    queue::family::QueueFamily,
+    pso::Rect,
+    queue::{
+        family::{QueueFamily, QueueGroup},
+        QueueType,
+    },
     window::{
         Extent2D,
         PresentMode,
@@ -20,12 +24,29 @@ use gfx_hal::{
         Surface,
         SwapchainConfig,
     },
-    Features, Instance,
+    Backend, Features, Instance,
 };
+use std::mem::ManuallyDrop;
 use winit::window::Window;
 
 pub struct HalState {
-    instance: back::Instance,
+    current_frame: usize,
+    in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
+    render_finished_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
+    image_available_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
+    command_buffers: Vec<<back::Backend as Backend>::CommandBuffer>,
+    command_pool: ManuallyDrop<<back::Backend as Backend>::CommandPool>,
+    framebuffers: Vec<<back::Backend as Backend>::Framebuffer>,
+    image_views: Vec<<back::Backend as Backend>::ImageView>,
+    render_pass: ManuallyDrop<<back::Backend as Backend>::RenderPass>,
+    render_area: Rect,
+    queue_group: ManuallyDrop<QueueGroup<back::Backend>>,
+    swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
+    device: ManuallyDrop<back::Device>,
+
+    adapter: Adapter<back::Backend>,
+    surface: <back::Backend as Backend>::Surface,
+    instance: ManuallyDrop<back::Instance>,
 }
 
 // Should move this where Winit can use it too
@@ -217,7 +238,32 @@ impl HalState {
             .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
             .collect::<Vec<_>>();
 
-        Ok(Self { instance })
+        let render_area = Rect {
+            x: 0,
+            y: 0,
+            w: content_size.width as i16,
+            h: content_size.height as i16,
+        };
+
+        Ok(Self {
+            current_frame: 0,
+            in_flight_fences,
+            render_finished_semaphores,
+            image_available_semaphores,
+            command_buffers,
+            command_pool: ManuallyDrop::new(command_pool),
+            framebuffers,
+            image_views,
+            render_pass: ManuallyDrop::new(render_pass),
+            render_area,
+            queue_group: ManuallyDrop::new(queue_group),
+            swapchain: ManuallyDrop::new(swapchain),
+            device: ManuallyDrop::new(device),
+
+            adapter,
+            surface,
+            instance: ManuallyDrop::new(instance),
+        })
     }
 }
 

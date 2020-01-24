@@ -28,6 +28,7 @@ use gfx_hal::{
     },
     Backend, Features, Instance,
 };
+use shaderc::{Compiler, ShaderKind};
 use std::{mem::ManuallyDrop, ops::Drop, ptr};
 use winit::window::Window;
 
@@ -57,6 +58,9 @@ pub struct HalState {
     // still preserving drop symantics that don't lead to double frees.
     freed: bool,
 }
+
+const VERT_SOURCE_FILE: &str = "shaders/vert.glsl";
+const FRAG_SOURCE_FILE: &str = "shaders/frag.glsl";
 
 // Should move this where Winit can use it too
 const VERSION: u32 = 1;
@@ -262,6 +266,10 @@ impl HalState {
             h: content_size.height as i16,
         };
 
+        let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
+        let vert = compile_shader(VERT_SOURCE_FILE, &mut compiler, &device, ShaderKind::Vertex);
+        let frag = compile_shader(FRAG_SOURCE_FILE, &mut compiler, &device, ShaderKind::Fragment);
+
         Ok(Self {
             current_frame: 0,
             in_flight_fences,
@@ -409,4 +417,22 @@ where
     (0..FRAMES_IN_FLIGHT)
         .map(|_| cb())
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn compile_shader(
+    src_file: &str,
+    compiler: &mut Compiler,
+    device: &back::Device,
+    kind: ShaderKind,
+) -> Result<<back::Backend as Backend>::ShaderModule, &'static str> {
+    let src =
+        std::fs::read_to_string(src_file).map_err(|_| "Could not read shader source file")?;
+    let spirv = compiler
+        .compile_into_spirv(&src, kind, src_file, "main", None)
+        .map_err(|e| {
+            log::error!("{}", e);
+            "Failed to compile fragment program"
+        })?;
+    unsafe { device.create_shader_module(spirv.as_binary()) }
+        .map_err(|_| "Failed to create shader module")
 }

@@ -11,3 +11,4 @@ winit = "^0"
 log = "^0"
 fern = { version = "^0", features = ["colored"] }
 arrayvec = "^0"
+shaderc = "^0"

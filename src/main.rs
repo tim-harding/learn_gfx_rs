@@ -56,8 +56,8 @@ fn main() -> Result<(), &'static str> {
                 }
                 | WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                 WindowEvent::Resized(_) => {
-                    // Winit logs some warnings from this, 
-                    // but it seems to work alright 
+                    // Winit logs some warnings from this,
+                    // but it seems to work alright
                     hal_state.free();
                     hal_state = match HalState::new(&window) {
                         Ok(state) => state,

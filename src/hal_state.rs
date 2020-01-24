@@ -32,7 +32,7 @@ use gfx_hal::{
     },
     Backend, Features, Instance,
 };
-use std::mem::ManuallyDrop;
+use std::{mem::ManuallyDrop, ops::Drop, ptr};
 use winit::window::Window;
 
 pub struct HalState {
@@ -190,9 +190,9 @@ impl HalState {
         // possibly a subregion
         let image_views = backbuffer
             .into_iter()
-            .map(|image| unsafe {
-                device
-                    .create_image_view(
+            .map(|image| {
+                unsafe {
+                    device.create_image_view(
                         &image,
                         ViewKind::D2,
                         FORMAT,
@@ -207,7 +207,8 @@ impl HalState {
                             layers: 0..1,
                         },
                     )
-                    .map_err(|_| "Could not create a backbuffer image view")
+                }
+                .map_err(|_| "Could not create a backbuffer image view")
             })
             .collect::<Result<Vec<_>, &str>>()?;
 
@@ -215,11 +216,11 @@ impl HalState {
         // is to be which attachment
         let framebuffers = image_views
             .iter()
-            .map(|view| unsafe {
+            .map(|view| {
                 let mut view_vec = ArrayVec::<[_; 1]>::new();
                 view_vec.push(view);
-                device
-                    .create_framebuffer(
+                unsafe {
+                    device.create_framebuffer(
                         &render_pass,
                         view_vec,
                         Extent {
@@ -229,7 +230,8 @@ impl HalState {
                             depth: 1,
                         },
                     )
-                    .map_err(|_| "Could not create framebuffer")
+                }
+                .map_err(|_| "Could not create framebuffer")
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -341,6 +343,48 @@ impl HalState {
         // Discard suboptimal warning
         .map(|_| ())
         .map_err(|_| "Failed to present into the swapchain!")
+    }
+}
+
+impl Drop for HalState {
+    fn drop(&mut self) {
+        self.device.wait_idle();
+
+        // Don't need to destroy command buffers,
+        // they are freed with their pool
+
+        for fence in self.in_flight_fences.drain(..) {
+            unsafe { self.device.destroy_fence(fence) }
+        }
+
+        for semaphore in self.render_finished_semaphores.drain(..) {
+            unsafe { self.device.destroy_semaphore(semaphore) }
+        }
+
+        for semaphore in self.image_available_semaphores.drain(..) {
+            unsafe { self.device.destroy_semaphore(semaphore) }
+        }
+
+        for framebuffer in self.framebuffers.drain(..) {
+            unsafe { self.device.destroy_framebuffer(framebuffer) }
+        }
+
+        for view in self.image_views.drain(..) {
+            unsafe { self.device.destroy_image_view(view) }
+        }
+
+        unsafe {
+            self.device
+                .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&mut self.command_pool)));
+            self.device
+                .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&mut self.render_pass)));
+            self.device
+                .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&mut self.swapchain)));
+
+            ManuallyDrop::drop(&mut self.queue_group);
+            ManuallyDrop::drop(&mut self.device);
+            ManuallyDrop::drop(&mut self.instance);
+        }
     }
 }
 

@@ -3,12 +3,21 @@ use gfx_hal::{
     adapter::{Gpu, PhysicalDevice},
     device::Device,
     format::Format,
+    format::{Aspects, Swizzle},
+    image::{Extent, SubresourceRange, ViewKind},
     pass::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
         SubpassDesc,
     },
     queue::family::QueueFamily,
-    window::{Extent2D, PresentMode, Surface, SwapchainConfig},
+    window::{
+        Extent2D,
+        PresentMode,
+        // Required import but compiler still complains.
+        // Can't find a way of silencing it.
+        Surface,
+        SwapchainConfig,
+    },
     Features, Instance,
 };
 use winit::window::Window;
@@ -136,7 +145,7 @@ impl HalState {
         };
 
         let subpass = SubpassDesc {
-            // Our color attachment will use ID zero
+            // Zero is color attachment ID
             colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
             depth_stencil: None,
             inputs: &[],
@@ -146,8 +155,49 @@ impl HalState {
             preserves: &[],
         };
 
-        unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
+        let render_pass = unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
             .map_err(|_| "Could not create render pass")?;
+
+        let image_views = backbuffer
+            .into_iter()
+            .map(|image| unsafe {
+                device
+                    .create_image_view(
+                        &image,
+                        ViewKind::D2,
+                        FORMAT,
+                        Swizzle::NO,
+                        SubresourceRange {
+                            // Image format properties that further specify the format,
+                            // especially if the format is ambiguous
+                            aspects: Aspects::COLOR,
+                            // Mipmaps
+                            levels: 0..1,
+                            // Image array layers
+                            layers: 0..1,
+                        },
+                    )
+                    .map_err(|_| "Could not create a backbuffer image view")
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+
+        let framebuffers = image_views
+            .iter()
+            .map(|view| unsafe {
+                device
+                    .create_framebuffer(
+                        &render_pass,
+                        vec![view],
+                        Extent {
+                            width: content_size.width,
+                            height: content_size.height,
+                            // Layers
+                            depth: 1,
+                        },
+                    )
+                    .map_err(|_| "Could not create framebuffer")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self { instance })
     }

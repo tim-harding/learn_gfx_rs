@@ -1,6 +1,7 @@
 use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::{Gpu, PhysicalDevice},
+    command::Level,
     device::Device,
     format::Format,
     format::{Aspects, Swizzle},
@@ -9,6 +10,7 @@ use gfx_hal::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
         SubpassDesc,
     },
+    pool::{CommandPool, CommandPoolCreateFlags},
     queue::family::QueueFamily,
     window::{
         Extent2D,
@@ -57,44 +59,40 @@ impl HalState {
             })
             .ok_or("No adapter supporting Vulkan")?;
 
-        let (device, queue_group) = {
-            // A set of queues with identical properties
-            let queue_family = adapter
-                .queue_families
-                .iter()
-                .find(|qf| qf.queue_type().supports_graphics() && surface.supports_queue_family(qf))
-                .ok_or("No queue family with graphics.")?;
+        // A set of queues with identical properties
+        let queue_family = adapter
+            .queue_families
+            .iter()
+            .find(|qf| qf.queue_type().supports_graphics() && surface.supports_queue_family(qf))
+            .ok_or("No queue family with graphics.")?;
 
-            // The adapter's underlying device
-            let gpu = unsafe {
-                adapter
-                    .physical_device
-                    // Request graphics queue with full priority and core features only
-                    .open(&[(queue_family, &[1.0f32])], Features::empty())
-                    .map_err(|_| "Could not open physical device")
-            }?;
+        // The adapter's underlying device
+        let gpu = unsafe {
+            adapter
+                .physical_device
+                // Request graphics queue with full priority and core features only
+                .open(&[(queue_family, &[1.0f32])], Features::empty())
+                .map_err(|_| "Could not open physical device")
+        }?;
 
-            // Take ownership of contents so the gpu can go
-            // out of scope while the queue group lives on
-            let Gpu {
-                device,
-                queue_groups,
-            } = gpu;
+        // Take ownership of contents so the gpu can go
+        // out of scope while the queue group lives on
+        let Gpu {
+            device,
+            queue_groups,
+        } = gpu;
 
-            // Queue group contains queues matching the queue family
-            let queue_group = queue_groups
-                .into_iter()
-                .find(|qg| qg.family == queue_family.id())
-                .ok_or("Matching queue group not found")?;
+        // Queue group contains queues matching the queue family
+        let queue_group = queue_groups
+            .into_iter()
+            .find(|qg| qg.family == queue_family.id())
+            .ok_or("Matching queue group not found")?;
 
-            if queue_group.queues.len() > 0 {
-                Ok(())
-            } else {
-                Err("Queue group contains no command queues")
-            }?;
-
-            (device, queue_group)
-        };
+        if queue_group.queues.len() > 0 {
+            Ok(())
+        } else {
+            Err("Queue group contains no command queues")
+        }?;
 
         let content_size = window.inner_size();
         let content_size = Extent2D {
@@ -106,7 +104,7 @@ impl HalState {
             .with_present_mode(PresentMode::MAILBOX);
 
         // Swapchain manages a collection of images
-        // Backbuffer contains handles to swapchain images
+        // Backbuffer contains handles to swapchain image memory
         let (swapchain, backbuffer) =
             unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
                 .map_err(|_| "Could not create swapchain")?;
@@ -131,8 +129,8 @@ impl HalState {
                 .map_err(|_| "Could not create fence")
         })?;
 
-        // Essentially a render target image, but which
-        // may also be attached as an input
+        // Describes a render target,
+        // to be attached as input or output
         let attachment = Attachment {
             format: Some(FORMAT),
             // Don't have MSAA yet anyway
@@ -144,6 +142,7 @@ impl HalState {
             layouts: AttachmentLayout::Undefined..AttachmentLayout::Present,
         };
 
+        // Render pass stage, distinct from multipass rendering
         let subpass = SubpassDesc {
             // Zero is color attachment ID
             colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
@@ -155,9 +154,13 @@ impl HalState {
             preserves: &[],
         };
 
+        // Collection of subpasses,
+        // defines which attachment will be written
         let render_pass = unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
             .map_err(|_| "Could not create render pass")?;
 
+        // Describe access to the underlying image memory,
+        // possibly a subregion
         let image_views = backbuffer
             .into_iter()
             .map(|image| unsafe {
@@ -181,6 +184,8 @@ impl HalState {
             })
             .collect::<Result<Vec<_>, &str>>()?;
 
+        // A framebuffer defines which image view
+        // is to be which attachment
         let framebuffers = image_views
             .iter()
             .map(|view| unsafe {
@@ -198,6 +203,19 @@ impl HalState {
                     .map_err(|_| "Could not create framebuffer")
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Allocator for command buffers
+        let mut command_pool = unsafe {
+            device.create_command_pool(queue_group.family, CommandPoolCreateFlags::RESET_INDIVIDUAL)
+        }
+        .map_err(|_| "Could not create command pool")?;
+
+        // Used to build up lists of commands for execution
+        let command_buffers = framebuffers
+            .iter()
+            // Primary command buffers cannot be reused across sub passes
+            .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
+            .collect::<Vec<_>>();
 
         Ok(Self { instance })
     }

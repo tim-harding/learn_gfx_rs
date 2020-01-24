@@ -1,8 +1,12 @@
+use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
-    command::{CommandBuffer, Level},
+    command::{
+        ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, CommandBufferInheritanceInfo,
+        Level, SubpassContents,
+    },
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
@@ -11,10 +15,11 @@ use gfx_hal::{
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    pso::Rect,
+    pso::{PipelineStage, Rect},
+    query::{ControlFlags, PipelineStatistic},
     queue::{
         family::{QueueFamily, QueueGroup},
-        QueueType,
+        CommandQueue, Submission,
     },
     window::{
         Extent2D,
@@ -22,6 +27,7 @@ use gfx_hal::{
         // Required import but compiler still complains.
         // Can't find a way of silencing it.
         Surface,
+        Swapchain,
         SwapchainConfig,
     },
     Backend, Features, Instance,
@@ -210,10 +216,12 @@ impl HalState {
         let framebuffers = image_views
             .iter()
             .map(|view| unsafe {
+                let mut view_vec = ArrayVec::<[_; 1]>::new();
+                view_vec.push(view);
                 device
                     .create_framebuffer(
                         &render_pass,
-                        vec![view],
+                        view_vec,
                         Extent {
                             width: content_size.width,
                             height: content_size.height,
@@ -264,6 +272,75 @@ impl HalState {
             surface,
             instance: ManuallyDrop::new(instance),
         })
+    }
+
+    pub fn draw_clear_frame(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
+        let image_available = &self.image_available_semaphores[self.current_frame];
+        let render_finished = &self.render_finished_semaphores[self.current_frame];
+        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
+
+        let (image_i, suboptimal) = unsafe {
+            self.swapchain
+                .acquire_image(core::u64::MAX, Some(image_available), None)
+        }
+        .map_err(|_| "Failed to acquire an image from the swapchain")?;
+
+        let image_i = image_i as usize;
+        if let Some(_) = suboptimal {
+            println!("Swapchain no longer matches drawing surface");
+        }
+
+        let flight_fence = &self.in_flight_fences[image_i];
+        unsafe { self.device.wait_for_fence(flight_fence, core::u64::MAX) }
+            .map_err(|_| "Failed to wait on the fence")?;
+        unsafe { self.device.reset_fence(flight_fence) }
+            .map_err(|_| "Failed to reset the fence")?;
+
+        unsafe {
+            let buffer = &mut self.command_buffers[image_i];
+            let clear_values = [ClearValue {
+                color: ClearColor {
+                    float32: [0.2, 0.5, 0.8, 1.0],
+                },
+            }];
+            let inheritance_info = CommandBufferInheritanceInfo {
+                subpass: None,
+                framebuffer: None,
+                occlusion_query_enable: false,
+                occlusion_query_flags: ControlFlags::empty(),
+                // Not sure what this does. Logging?
+                pipeline_statistics: PipelineStatistic::empty(),
+            };
+            buffer.begin(CommandBufferFlags::ONE_TIME_SUBMIT, inheritance_info);
+            buffer.begin_render_pass(
+                &self.render_pass,
+                &self.framebuffers[image_i],
+                self.render_area,
+                clear_values.iter(),
+                SubpassContents::Inline,
+            );
+            buffer.finish();
+        }
+
+        let command_buffers = &self.command_buffers.iter().nth(image_i);
+        let wait_semaphores: ArrayVec<[_; 1]> =
+            [(image_available, PipelineStage::COLOR_ATTACHMENT_OUTPUT)].into();
+        let signal_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
+        let present_wait_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
+        let submission = Submission {
+            command_buffers,
+            wait_semaphores,
+            signal_semaphores,
+        };
+        let command_queue = &mut self.queue_group.queues[0];
+        unsafe {
+            command_queue.submit(submission, Some(flight_fence));
+            self.swapchain
+                .present(command_queue, image_i as u32, present_wait_semaphores)
+        }
+        // Discard suboptimal warning
+        .map(|_| ())
+        .map_err(|_| "Failed to present into the swapchain!")
     }
 }
 

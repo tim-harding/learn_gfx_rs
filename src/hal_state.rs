@@ -1,8 +1,9 @@
+use crate::vector::Vec2;
 use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
-    adapter::{Gpu, PhysicalDevice},
-    buffer::Usage,
+    adapter::{Adapter, Gpu, PhysicalDevice},
+    buffer::{IndexBufferView, Usage},
     command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
     device::Device,
     format::{Aspects, Format, Swizzle},
@@ -25,7 +26,7 @@ use gfx_hal::{
         CommandQueue, Submission,
     },
     window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
-    Backend, Features, Instance, MemoryTypeId,
+    Backend, Features, IndexType, Instance, MemoryTypeId,
 };
 use shaderc::{Compiler, ShaderKind};
 use std::{
@@ -34,7 +35,6 @@ use std::{
     ptr,
 };
 use winit::window::Window;
-use crate::vector::Vec2;
 
 pub struct HalState {
     current_frame: usize,
@@ -51,12 +51,12 @@ pub struct HalState {
     swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
     device: ManuallyDrop<back::Device>,
 
-    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
-    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
+    vertices: BufferInfo,
+    indices: BufferInfo,
+
     descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout>,
     pipeline_layout: ManuallyDrop<<back::Backend as Backend>::PipelineLayout>,
     graphics_pipeline: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
-    requirements: Requirements,
 
     instance: ManuallyDrop<back::Instance>,
 
@@ -68,13 +68,48 @@ pub struct HalState {
     freed: bool,
 }
 
+struct BufferInfo {
+    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
+    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
+    requirements: Requirements,
+}
+
+impl BufferInfo {
+    pub fn new(
+        buffer: <back::Backend as Backend>::Buffer,
+        memory: <back::Backend as Backend>::Memory,
+        requirements: Requirements,
+    ) -> Self {
+        Self {
+            buffer: ManuallyDrop::new(buffer),
+            memory: ManuallyDrop::new(memory),
+            requirements,
+        }
+    }
+
+    pub fn free(&mut self, device: &back::Device) {
+        unsafe {
+            device.destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
+            device.free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
+        }
+    }
+}
+
 #[rustfmt::skip]
-const TRI_DATA: [f32; 15] = [
-    -0.5, -0.5, 1.0, 0.0, 0.0,
-     0.0,  0.5, 0.0, 1.0, 0.0,
-     0.5, -0.5, 0.0, 0.0, 1.0,
+const QUAD_DATA: [f32; 8] = [
+    -0.5, -0.5, 
+    -0.5,  0.5, 
+     0.5,  0.5, 
+     0.5, -0.5, 
 ];
-const TRI_DATA_BYTES: usize = TRI_DATA.len() * mem::size_of::<f32>();
+const QUAD_DATA_BYTES: usize = QUAD_DATA.len() * mem::size_of::<f32>();
+
+#[rustfmt::skip]
+const QUAD_INDICES: [u16; 6] = [
+    0, 1, 2,
+    0, 2, 3,
+];
+const QUAD_INDICES_BYTES: usize = QUAD_INDICES.len() * mem::size_of::<u16>();
 
 const VERT_PATH: &str = "shaders/vert.glsl";
 const FRAG_PATH: &str = "shaders/frag.glsl";
@@ -303,22 +338,13 @@ impl HalState {
             restart_index: None,
         };
 
-        let vertex_buffers = vec![
-            VertexBufferDesc {
-                // Not the location listed on the shader,
-                // this is just a unique id for the buffer
-                binding: 0,
-                stride: (mem::size_of::<f32>() * 5) as u32,
-                rate: VertexInputRate::Vertex,
-            },
-            /*
-            VertexBufferDesc {
-                binding: 1,
-                stride: (mem::size_of::<f32>() * 5) as u32,
-                rate: VertexInputRate::Vertex,
-            },
-            */
-        ];
+        let vertex_buffers = vec![VertexBufferDesc {
+            // Not the location listed on the shader,
+            // this is just a unique id for the buffer
+            binding: 0,
+            stride: (mem::size_of::<f32>() * 2) as u32,
+            rate: VertexInputRate::Vertex,
+        }];
 
         let attributes = vec![
             AttributeDesc {
@@ -330,14 +356,6 @@ impl HalState {
                     // Float vec2
                     format: Format::Rg32Sfloat,
                     offset: 0,
-                },
-            },
-            AttributeDesc {
-                location: 1,
-                binding: 0,
-                element: Element {
-                    format: Format::Rgb32Sfloat,
-                    offset: (2 * mem::size_of::<f32>()) as u32,
                 },
             },
         ];
@@ -412,34 +430,8 @@ impl HalState {
             device.destroy_shader_module(frag);
         }
 
-        let mut buffer = unsafe { device.create_buffer(TRI_DATA_BYTES as u64, Usage::VERTEX) }
-            .map_err(|_| "Failed to create a buffer for the vertices")?;
-
-        // Creation of the buffer does not imply allocation.
-        // We can now query it's prerequistes and allocate memory to match.
-        let requirements = unsafe { device.get_buffer_requirements(&buffer) };
-
-        // Find id of CPU-visible memory for vertex buffer
-        let memory_type_id = adapter
-            .physical_device
-            .memory_properties()
-            .memory_types
-            .iter()
-            .enumerate()
-            .find(|&(id, memory_type)| {
-                requirements.type_mask & (1 << id) != 0
-                    && memory_type.properties.contains(Properties::CPU_VISIBLE)
-            })
-            .map(|(id, _)| MemoryTypeId(id))
-            .ok_or("Failed to find a memory type to support the vertex buffer")?;
-
-        // Allocate vertex buffer
-        let memory = unsafe { device.allocate_memory(memory_type_id, requirements.size) }
-            .map_err(|_| "Failed to allocate vertex buffer memory")?;
-
-        // Make the buffer use the allocation
-        unsafe { device.bind_buffer_memory(&memory, 0, &mut buffer) }
-            .map_err(|_| "Failed to bind the buffer memory")?;
+        let vertices = create_buffer(&device, &adapter, QUAD_DATA_BYTES as u64, Usage::VERTEX)?;
+        let indices = create_buffer(&device, &adapter, QUAD_INDICES_BYTES as u64, Usage::INDEX)?;
 
         Ok(Self {
             current_frame: 0,
@@ -456,12 +448,12 @@ impl HalState {
             swapchain: ManuallyDrop::new(swapchain),
             device: ManuallyDrop::new(device),
 
-            buffer: ManuallyDrop::new(buffer),
-            memory: ManuallyDrop::new(memory),
+            vertices,
+            indices,
+
             descriptor_set_layouts,
             pipeline_layout: ManuallyDrop::new(pipeline_layout),
             graphics_pipeline: ManuallyDrop::new(graphics_pipeline),
-            requirements,
 
             instance: ManuallyDrop::new(instance),
             freed: false,
@@ -496,28 +488,45 @@ impl HalState {
         unsafe { self.device.reset_fence(flight_fence) }
             .map_err(|_| "Failed to reset the fence")?;
 
-        // Copy triangle data to the GPU every frame for simplicity.
+        // Copy quad data to the GPU every frame for simplicity.
         let mapped_memory = unsafe {
             self.device
-                .map_memory(&self.memory, 0..self.requirements.size)
+                .map_memory(&self.vertices.memory, 0..self.vertices.requirements.size)
         }
         .map_err(|_| "Failed to memory map vertex buffer")?;
 
         unsafe {
             std::ptr::copy(
-                TRI_DATA.as_ptr() as *const u8,
+                QUAD_DATA.as_ptr() as *const u8,
                 mapped_memory,
-                TRI_DATA_BYTES,
+                QUAD_DATA_BYTES,
             );
-            self.device.unmap_memory(&self.memory)
+            self.device.unmap_memory(&self.vertices.memory)
         }
+
+        ////////////// CUT N PASTE ///////////////////
+        let mapped_memory = unsafe {
+            self.device
+                .map_memory(&self.indices.memory, 0..self.indices.requirements.size)
+        }
+        .map_err(|_| "Failed to memory map index buffer")?;
+
+        unsafe {
+            std::ptr::copy(
+                QUAD_INDICES.as_ptr() as *const u8,
+                mapped_memory,
+                QUAD_INDICES_BYTES,
+            );
+            self.device.unmap_memory(&self.indices.memory)
+        }
+        /////////////////////////////////////////////
 
         let commands = &mut self.command_buffers[image_i];
         let clear_values = [ClearValue {
             color: ClearColor { float32: color },
         }];
         // Here we must force the Deref impl of ManuallyDrop to play nice.
-        let buffer_ref: &<back::Backend as Backend>::Buffer = &self.buffer;
+        let buffer_ref: &<back::Backend as Backend>::Buffer = &self.vertices.buffer;
         let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
         unsafe {
             let mouse_x = mem::transmute::<f32, u32>(mouse.x);
@@ -525,6 +534,11 @@ impl HalState {
             commands.begin_primary(CommandBufferFlags::EMPTY);
             commands.bind_graphics_pipeline(&self.graphics_pipeline);
             commands.bind_vertex_buffers(0, buffers);
+            commands.bind_index_buffer(IndexBufferView {
+                buffer: &self.indices.buffer,
+                offset: 0,
+                index_type: IndexType::U16,
+            });
             commands.push_graphics_constants(
                 &self.pipeline_layout,
                 ShaderStageFlags::VERTEX,
@@ -538,8 +552,7 @@ impl HalState {
                 clear_values.iter(),
                 SubpassContents::Inline,
             );
-            // Three verts, one instance
-            commands.draw(0..3, 0..1);
+            commands.draw_indexed(0..6, 0, 0..1);
             commands.end_render_pass();
             commands.finish();
         }
@@ -608,10 +621,6 @@ impl HalState {
             self.device
                 .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&self.swapchain)));
             self.device
-                .destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
-            self.device
-                .free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
-            self.device
                 .destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(
                     &self.pipeline_layout,
                 )));
@@ -657,4 +666,42 @@ fn compile_shader(
         })?;
     unsafe { device.create_shader_module(spirv.as_binary()) }
         .map_err(|_| "Failed to create shader module")
+}
+
+fn create_buffer(
+    device: &back::Device,
+    adapter: &Adapter<back::Backend>,
+    bytes: u64,
+    usage: Usage,
+) -> Result<BufferInfo, &'static str> {
+    let mut buffer = unsafe { device.create_buffer(bytes, usage) }
+        .map_err(|_| "Failed to create a buffer for the vertices")?;
+
+    // Creation of the buffer does not imply allocation.
+    // We can now query it's prerequistes and allocate memory to match.
+    let requirements = unsafe { device.get_buffer_requirements(&buffer) };
+
+    // Find id of CPU-visible memory for vertex buffer
+    let memory_type_id = adapter
+        .physical_device
+        .memory_properties()
+        .memory_types
+        .iter()
+        .enumerate()
+        .find(|&(id, memory_type)| {
+            requirements.type_mask & (1 << id) != 0
+                && memory_type.properties.contains(Properties::CPU_VISIBLE)
+        })
+        .map(|(id, _)| MemoryTypeId(id))
+        .ok_or("Failed to find a memory type to support the vertex buffer")?;
+
+    // Allocate vertex buffer
+    let memory = unsafe { device.allocate_memory(memory_type_id, requirements.size) }
+        .map_err(|_| "Failed to allocate vertex buffer memory")?;
+
+    // Make the buffer use the allocation
+    unsafe { device.bind_buffer_memory(&memory, 0, &mut buffer) }
+        .map_err(|_| "Failed to bind the buffer memory")?;
+
+    Ok(BufferInfo::new(buffer, memory, requirements))
 }

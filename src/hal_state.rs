@@ -36,6 +36,60 @@ use std::{
 };
 use winit::window::Window;
 
+#[rustfmt::skip]
+const QUAD_DATA: [f32; 8] = [
+    -0.5, -0.5, 
+    -0.5,  0.5, 
+     0.5,  0.5, 
+     0.5, -0.5, 
+];
+
+#[rustfmt::skip]
+const QUAD_INDICES: [u16; 6] = [
+    0, 1, 2,
+    0, 2, 3,
+];
+
+const VERT_PATH: &str = "shaders/vert.glsl";
+const FRAG_PATH: &str = "shaders/frag.glsl";
+
+// Should move this where Winit can use it too
+const VERSION: u32 = 1;
+const WINDOW_NAME: &str = "Learn Gfx";
+
+// Matches mailbox presentation, which
+// uses three images for vsync
+const FRAMES_IN_FLIGHT: usize = 3;
+
+const FORMAT: Format = Format::Rgba8Srgb;
+
+struct BufferInfo {
+    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
+    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
+    requirements: Requirements,
+}
+
+impl BufferInfo {
+    pub fn new(
+        buffer: <back::Backend as Backend>::Buffer,
+        memory: <back::Backend as Backend>::Memory,
+        requirements: Requirements,
+    ) -> Self {
+        Self {
+            buffer: ManuallyDrop::new(buffer),
+            memory: ManuallyDrop::new(memory),
+            requirements,
+        }
+    }
+
+    pub fn free(&mut self, device: &back::Device) {
+        unsafe {
+            device.destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
+            device.free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
+        }
+    }
+}
+
 pub struct HalState {
     current_frame: usize,
     in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
@@ -67,62 +121,6 @@ pub struct HalState {
     // still preserving drop symantics that don't lead to double frees.
     freed: bool,
 }
-
-struct BufferInfo {
-    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
-    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
-    requirements: Requirements,
-}
-
-impl BufferInfo {
-    pub fn new(
-        buffer: <back::Backend as Backend>::Buffer,
-        memory: <back::Backend as Backend>::Memory,
-        requirements: Requirements,
-    ) -> Self {
-        Self {
-            buffer: ManuallyDrop::new(buffer),
-            memory: ManuallyDrop::new(memory),
-            requirements,
-        }
-    }
-
-    pub fn free(&mut self, device: &back::Device) {
-        unsafe {
-            device.destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
-            device.free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
-        }
-    }
-}
-
-#[rustfmt::skip]
-const QUAD_DATA: [f32; 8] = [
-    -0.5, -0.5, 
-    -0.5,  0.5, 
-     0.5,  0.5, 
-     0.5, -0.5, 
-];
-const QUAD_DATA_BYTES: usize = QUAD_DATA.len() * mem::size_of::<f32>();
-
-#[rustfmt::skip]
-const QUAD_INDICES: [u16; 6] = [
-    0, 1, 2,
-    0, 2, 3,
-];
-const QUAD_INDICES_BYTES: usize = QUAD_INDICES.len() * mem::size_of::<u16>();
-
-const VERT_PATH: &str = "shaders/vert.glsl";
-const FRAG_PATH: &str = "shaders/frag.glsl";
-
-// Should move this where Winit can use it too
-const VERSION: u32 = 1;
-const WINDOW_NAME: &str = "Learn Gfx";
-
-// Matches mailbox presentation, which
-// uses three images for vsync
-const FRAMES_IN_FLIGHT: usize = 3;
-
-const FORMAT: Format = Format::Rgba8Srgb;
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
@@ -430,8 +428,8 @@ impl HalState {
             device.destroy_shader_module(frag);
         }
 
-        let vertices = create_buffer(&device, &adapter, QUAD_DATA_BYTES as u64, Usage::VERTEX)?;
-        let indices = create_buffer(&device, &adapter, QUAD_INDICES_BYTES as u64, Usage::INDEX)?;
+        let vertices = create_buffer(&device, &adapter, array_size(&QUAD_DATA) as u64, Usage::VERTEX)?;
+        let indices = create_buffer(&device, &adapter, array_size(&QUAD_INDICES) as u64, Usage::INDEX)?;
 
         Ok(Self {
             current_frame: 0,
@@ -488,38 +486,8 @@ impl HalState {
         unsafe { self.device.reset_fence(flight_fence) }
             .map_err(|_| "Failed to reset the fence")?;
 
-        // Copy quad data to the GPU every frame for simplicity.
-        let mapped_memory = unsafe {
-            self.device
-                .map_memory(&self.vertices.memory, 0..self.vertices.requirements.size)
-        }
-        .map_err(|_| "Failed to memory map vertex buffer")?;
-
-        unsafe {
-            std::ptr::copy(
-                QUAD_DATA.as_ptr() as *const u8,
-                mapped_memory,
-                QUAD_DATA_BYTES,
-            );
-            self.device.unmap_memory(&self.vertices.memory)
-        }
-
-        ////////////// CUT N PASTE ///////////////////
-        let mapped_memory = unsafe {
-            self.device
-                .map_memory(&self.indices.memory, 0..self.indices.requirements.size)
-        }
-        .map_err(|_| "Failed to memory map index buffer")?;
-
-        unsafe {
-            std::ptr::copy(
-                QUAD_INDICES.as_ptr() as *const u8,
-                mapped_memory,
-                QUAD_INDICES_BYTES,
-            );
-            self.device.unmap_memory(&self.indices.memory)
-        }
-        /////////////////////////////////////////////
+        send_buffer_data(&self.device, &self.vertices, &QUAD_DATA);
+        send_buffer_data(&self.device, &self.indices, &QUAD_INDICES);
 
         let commands = &mut self.command_buffers[image_i];
         let clear_values = [ClearValue {
@@ -704,4 +672,27 @@ fn create_buffer(
         .map_err(|_| "Failed to bind the buffer memory")?;
 
     Ok(BufferInfo::new(buffer, memory, requirements))
+}
+
+fn send_buffer_data<T>(device: &back::Device, info: &BufferInfo, data: &[T]) -> Result<(), &'static str> {
+    let mapped_memory = unsafe {
+        device
+            .map_memory(&info.memory, 0..info.requirements.size)
+    }
+    .map_err(|_| "Failed to memory map buffer")?;
+
+    unsafe {
+        std::ptr::copy(
+            data.as_ptr() as *const u8,
+            mapped_memory,
+            array_size(data),
+        );
+        device.unmap_memory(&info.memory)
+    }
+
+    Ok(())
+}
+
+fn array_size<T>(array: &[T]) -> usize {
+    array.len() * mem::size_of::<T>()
 }

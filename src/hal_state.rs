@@ -26,10 +26,7 @@ use gfx_hal::{
         CommandQueue, Submission,
     },
     window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
-    Backend,
-    Features,
-    Instance,
-    MemoryTypeId,
+    Backend, Features, Instance, MemoryTypeId,
 };
 use shaderc::{Compiler, ShaderKind};
 use std::{
@@ -74,7 +71,7 @@ pub struct HalState {
 }
 
 const TRI_DATA: [f32; 6] = [-0.5, -0.5, 0.0, 0.5, 0.5, -0.5];
-const TRI_DATA_BYTES: u64 = (TRI_DATA.len() * mem::size_of::<f32>()) as u64;
+const TRI_DATA_BYTES: usize = TRI_DATA.len() * mem::size_of::<f32>();
 
 const VERT_PATH: &str = "shaders/vert.glsl";
 const FRAG_PATH: &str = "shaders/frag.glsl";
@@ -245,8 +242,7 @@ impl HalState {
         let framebuffers = image_views
             .iter()
             .map(|view| {
-                let mut view_vec = ArrayVec::<[_; 1]>::new();
-                view_vec.push(view);
+                let view_vec: ArrayVec<[_; 1]> = [view].into();
                 unsafe {
                     device.create_framebuffer(
                         &render_pass,
@@ -394,7 +390,7 @@ impl HalState {
             device.destroy_shader_module(frag);
         }
 
-        let mut buffer = unsafe { device.create_buffer(TRI_DATA_BYTES, Usage::VERTEX) }
+        let mut buffer = unsafe { device.create_buffer(TRI_DATA_BYTES as u64, Usage::VERTEX) }
             .map_err(|_| "Failed to create a buffer for the vertices")?;
 
         // Creation of the buffer does not imply allocation.
@@ -449,7 +445,7 @@ impl HalState {
         })
     }
 
-    pub fn draw_clear_frame(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
+    pub fn draw_frame(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
         if self.freed {
             Err("Use of freed Gfx state")
         } else {
@@ -477,6 +473,22 @@ impl HalState {
         unsafe { self.device.reset_fence(flight_fence) }
             .map_err(|_| "Failed to reset the fence")?;
 
+        // Copy triangle data to the GPU every frame for simplicity.
+        let mut mapped_memory = unsafe {
+            self.device
+                .map_memory(&self.memory, 0..self.requirements.size)
+        }
+        .map_err(|_| "Failed to memory map vertex buffer")?;
+
+        unsafe {
+            std::ptr::copy(
+                TRI_DATA.as_ptr() as *const u8,
+                mapped_memory,
+                TRI_DATA_BYTES,
+            );
+            self.device.unmap_memory(&self.memory)
+        }
+
         let buffer = &mut self.command_buffers[image_i];
         let clear_values = [ClearValue {
             color: ClearColor { float32: color },
@@ -490,6 +502,13 @@ impl HalState {
                 clear_values.iter(),
                 SubpassContents::Inline,
             );
+            buffer.bind_graphics_pipeline(&self.graphics_pipeline);
+            // Here we must force the Deref impl of ManuallyDrop to play nice.
+            let buffer_ref: &<back::Backend as Backend>::Buffer = &self.buffer;
+            let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
+            buffer.bind_vertex_buffers(0, buffers);
+            // Three verts, one instance
+            buffer.draw(0..3, 0..1);
             buffer.finish();
         }
 
@@ -561,9 +580,13 @@ impl HalState {
             self.device
                 .free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
             self.device
-                .destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(&self.pipeline_layout)));
+                .destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(
+                    &self.pipeline_layout,
+                )));
             self.device
-                .destroy_graphics_pipeline(ManuallyDrop::into_inner(ptr::read(&self.graphics_pipeline)));
+                .destroy_graphics_pipeline(ManuallyDrop::into_inner(ptr::read(
+                    &self.graphics_pipeline,
+                )));
 
             ManuallyDrop::drop(&mut self.queue_group);
             ManuallyDrop::drop(&mut self.device);

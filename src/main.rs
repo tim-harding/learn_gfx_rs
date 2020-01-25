@@ -87,7 +87,7 @@ fn main() -> Result<(), &'static str> {
 
 fn render(hal_state: &mut HalState, input_state: &InputState) {
     let color = [input_state.mouse.x, input_state.mouse.y, 0.2, 1.0];
-    if let Err(e) = hal_state.draw_clear_frame(color) {
+    if let Err(e) = hal_state.draw_frame(color) {
         println!("{}", e);
     }
 }

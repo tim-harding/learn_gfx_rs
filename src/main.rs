@@ -1,5 +1,5 @@
-mod hal_state;
-use hal_state::HalState;
+mod gfx_state;
+use gfx_state::GfxState;
 
 use fern::colors::ColoredLevelConfig;
 use winit::{
@@ -44,10 +44,10 @@ fn main() -> Result<(), &'static str> {
         .build(&event_loop)
         .unwrap();
 
-    let mut hal_state = HalState::new(&window)?;
+    let mut gfx_state = GfxState::new(&window)?;
     let mut input_state = InputState::default();
 
-    render(&mut hal_state, &input_state);
+    render(&mut gfx_state, &input_state);
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -65,8 +65,8 @@ fn main() -> Result<(), &'static str> {
                 WindowEvent::Resized(_) => {
                     // Winit logs some warnings from this,
                     // but it seems to work alright
-                    hal_state.free();
-                    hal_state = match HalState::new(&window) {
+                    gfx_state.free();
+                    gfx_state = match GfxState::new(&window) {
                         Ok(state) => state,
                         Err(e) => panic!(e),
                     }
@@ -84,7 +84,7 @@ fn main() -> Result<(), &'static str> {
             },
 
             Event::RedrawRequested(_) => {
-                render(&mut hal_state, &input_state);
+                render(&mut gfx_state, &input_state);
             }
 
             _ => (),
@@ -92,8 +92,8 @@ fn main() -> Result<(), &'static str> {
     });
 }
 
-fn render(hal_state: &mut HalState, input_state: &InputState) {
-    if let Err(e) = hal_state.draw_frame([0.2, 0.2, 0.2, 1.0], input_state.mouse) {
+fn render(gfx_state: &mut GfxState, input_state: &InputState) {
+    if let Err(e) = gfx_state.draw_frame([0.2, 0.2, 0.2, 1.0], input_state.mouse) {
         println!("{}", e);
     }
 }

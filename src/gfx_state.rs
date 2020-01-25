@@ -50,7 +50,7 @@ const QUAD_INDICES: [u16; 6] = [
 const FRAMES_IN_FLIGHT: usize = 3;
 const FORMAT: Format = Format::Rgba8Srgb;
 
-pub struct HalState {
+pub struct GfxState {
     current_frame: usize,
     content_size: Rect,
 
@@ -73,7 +73,7 @@ pub struct HalState {
     indices: BufferInfo,
 }
 
-impl HalState {
+impl GfxState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
         // Backend handle
         let instance =
@@ -400,7 +400,7 @@ impl HalState {
     }
 }
 
-impl Drop for HalState {
+impl Drop for GfxState {
     fn drop(&mut self) {
         self.free()
     }

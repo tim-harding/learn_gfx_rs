@@ -51,23 +51,24 @@ const FRAMES_IN_FLIGHT: usize = 3;
 const FORMAT: Format = Format::Rgba8Srgb;
 
 pub struct HalState {
-    queue_group: QueueGroup<back::Backend>,
-    device: back::Device,
-
     current_frame: usize,
+    content_size: Rect,
+
+    device: back::Device,
+    queue_group: QueueGroup<back::Backend>,
+
     in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
     render_finished_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
     image_available_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
     command_buffers: Vec<<back::Backend as Backend>::CommandBuffer>,
-    command_pool: ManuallyDrop<<back::Backend as Backend>::CommandPool>,
     framebuffers: Vec<<back::Backend as Backend>::Framebuffer>,
     image_views: Vec<<back::Backend as Backend>::ImageView>,
+
+    command_pool: ManuallyDrop<<back::Backend as Backend>::CommandPool>,
     render_pass: ManuallyDrop<<back::Backend as Backend>::RenderPass>,
-    content_size: Rect,
     swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
 
     pipeline: PipelineInfo,
-
     vertices: BufferInfo,
     indices: BufferInfo,
 }
@@ -243,9 +244,9 @@ impl HalState {
         };
 
         Ok(Self {
-            image_available_semaphores: flight(make_semaphore)?,
-            render_finished_semaphores: flight(make_semaphore)?,
-            in_flight_fences: flight(|| {
+            image_available_semaphores: full_flight(make_semaphore)?,
+            render_finished_semaphores: full_flight(make_semaphore)?,
+            in_flight_fences: full_flight(|| {
                 device
                     .create_fence(true)
                     .map_err(|_| "Could not create fence")
@@ -287,16 +288,12 @@ impl HalState {
         let render_finished = &self.render_finished_semaphores[self.current_frame];
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
 
-        let (image_i, suboptimal) = unsafe {
+        let (image_i, _suboptimal) = unsafe {
             self.swapchain
                 .acquire_image(core::u64::MAX, Some(image_available), None)
         }
         .map_err(|_| "Failed to acquire an image from the swapchain")?;
-
         let image_i = image_i as usize;
-        if suboptimal.is_some() {
-            println!("Swapchain no longer matches drawing surface");
-        }
 
         let flight_fence = &self.in_flight_fences[image_i];
         unsafe { self.device.wait_for_fence(flight_fence, core::u64::MAX) }
@@ -308,15 +305,8 @@ impl HalState {
         self.indices.load_data(&self.device, &QUAD_INDICES)?;
 
         let commands = &mut self.command_buffers[image_i];
-        let clear_values = [ClearValue {
-            color: ClearColor { float32: color },
-        }];
-        // Here we must force the Deref impl of ManuallyDrop to play nice.
-        let buffer_ref: &<back::Backend as Backend>::Buffer = &self.vertices.buffer;
-        let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
+        let buffers: ArrayVec<[_; 1]> = [(&*self.vertices.buffer, 0)].into();
         unsafe {
-            let mouse_x = mem::transmute::<f32, u32>(mouse.x);
-            let mouse_y = mem::transmute::<f32, u32>(mouse.y);
             commands.begin_primary(CommandBufferFlags::EMPTY);
             commands.bind_graphics_pipeline(&self.pipeline.handle);
             commands.bind_vertex_buffers(0, buffers);
@@ -329,13 +319,19 @@ impl HalState {
                 &self.pipeline.layout,
                 ShaderStageFlags::VERTEX,
                 0,
-                &[mouse_x, mouse_y],
+                &[
+                    mem::transmute::<f32, u32>(mouse.x),
+                    mem::transmute::<f32, u32>(mouse.y),
+                ],
             );
             commands.begin_render_pass(
                 &self.render_pass,
                 &self.framebuffers[image_i],
                 self.content_size,
-                clear_values.iter(),
+                [ClearValue {
+                    color: ClearColor { float32: color },
+                }]
+                .iter(),
                 SubpassContents::Inline,
             );
             commands.draw_indexed(0..6, 0, 0..1);
@@ -343,16 +339,15 @@ impl HalState {
             commands.finish();
         }
 
-        let command_buffers = &self.command_buffers.get(image_i);
         let wait_semaphores: ArrayVec<[_; 1]> =
             [(image_available, PipelineStage::COLOR_ATTACHMENT_OUTPUT)].into();
         let signal_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
-        let present_wait_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
         let submission = Submission {
-            command_buffers,
+            command_buffers: &self.command_buffers.get(image_i),
             wait_semaphores,
             signal_semaphores,
         };
+        let present_wait_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
         let command_queue = &mut self.queue_group.queues[0];
         unsafe {
             command_queue.submit(submission, Some(flight_fence));
@@ -411,7 +406,7 @@ impl Drop for HalState {
     }
 }
 
-fn flight<T, F>(cb: F) -> Result<Vec<T>, &'static str>
+fn full_flight<T, F>(cb: F) -> Result<Vec<T>, &'static str>
 where
     F: Fn() -> Result<T, &'static str>,
 {

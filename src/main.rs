@@ -8,13 +8,10 @@ use winit::{
     window::WindowBuilder,
 };
 
-#[derive(Default)]
-struct Vec2 {
-    pub x: f32,
-    pub y: f32,
-}
+pub mod vector;
+use vector::Vec2;
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 struct InputState {
     pub mouse: Vec2,
 }
@@ -87,8 +84,7 @@ fn main() -> Result<(), &'static str> {
 }
 
 fn render(hal_state: &mut HalState, input_state: &InputState) {
-    let color = [input_state.mouse.x, input_state.mouse.y, 0.2, 1.0];
-    if let Err(e) = hal_state.draw_frame(color) {
+    if let Err(e) = hal_state.draw_frame([0.2, 0.2, 0.2, 1.0], input_state.mouse) {
         println!("{}", e);
     }
 }

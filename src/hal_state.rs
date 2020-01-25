@@ -34,6 +34,7 @@ use std::{
     ptr,
 };
 use winit::window::Window;
+use crate::vector::Vec2;
 
 pub struct HalState {
     current_frame: usize,
@@ -467,7 +468,7 @@ impl HalState {
         })
     }
 
-    pub fn draw_frame(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
+    pub fn draw_frame(&mut self, color: [f32; 4], mouse: Vec2) -> Result<(), &'static str> {
         if self.freed {
             Err("Use of freed Gfx state")
         } else {
@@ -519,9 +520,17 @@ impl HalState {
         let buffer_ref: &<back::Backend as Backend>::Buffer = &self.buffer;
         let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
         unsafe {
+            let mouse_x = mem::transmute::<f32, u32>(mouse.x);
+            let mouse_y = mem::transmute::<f32, u32>(mouse.y);
             commands.begin_primary(CommandBufferFlags::EMPTY);
             commands.bind_graphics_pipeline(&self.graphics_pipeline);
             commands.bind_vertex_buffers(0, buffers);
+            commands.push_graphics_constants(
+                &self.pipeline_layout,
+                ShaderStageFlags::VERTEX,
+                0,
+                &[mouse_x, mouse_y],
+            );
             commands.begin_render_pass(
                 &self.render_pass,
                 &self.framebuffers[image_i],

@@ -8,8 +8,11 @@ use winit::{
     window::WindowBuilder,
 };
 
-pub mod vector;
-use vector::Vec2;
+pub mod utils;
+use utils::Vec2;
+
+mod buffer_info;
+pub use buffer_info::BufferInfo;
 
 #[derive(Default, Copy, Clone)]
 struct InputState {

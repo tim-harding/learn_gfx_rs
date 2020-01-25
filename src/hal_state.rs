@@ -1,14 +1,13 @@
-use crate::vector::Vec2;
+use crate::{utils::Vec2, BufferInfo};
 use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
-    adapter::{Adapter, Gpu, PhysicalDevice},
+    adapter::{Gpu, PhysicalDevice},
     buffer::{IndexBufferView, Usage},
     command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
-    memory::{Properties, Requirements},
     pass::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass,
         SubpassDesc,
@@ -26,7 +25,7 @@ use gfx_hal::{
         CommandQueue, Submission,
     },
     window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
-    Backend, Features, IndexType, Instance, MemoryTypeId,
+    Backend, Features, IndexType, Instance
 };
 use shaderc::{Compiler, ShaderKind};
 use std::{
@@ -63,33 +62,6 @@ const FRAMES_IN_FLIGHT: usize = 3;
 
 const FORMAT: Format = Format::Rgba8Srgb;
 
-struct BufferInfo {
-    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
-    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
-    requirements: Requirements,
-}
-
-impl BufferInfo {
-    pub fn new(
-        buffer: <back::Backend as Backend>::Buffer,
-        memory: <back::Backend as Backend>::Memory,
-        requirements: Requirements,
-    ) -> Self {
-        Self {
-            buffer: ManuallyDrop::new(buffer),
-            memory: ManuallyDrop::new(memory),
-            requirements,
-        }
-    }
-
-    pub fn free(&mut self, device: &back::Device) {
-        unsafe {
-            device.destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
-            device.free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
-        }
-    }
-}
-
 pub struct HalState {
     current_frame: usize,
     in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
@@ -113,21 +85,10 @@ pub struct HalState {
     graphics_pipeline: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
 
     instance: ManuallyDrop<back::Instance>,
-
-    // It would be preferrable to use drop symantics exclusively,
-    // but I cannot drop HalState once it has been moved into
-    // the Winit main loop closure. This is necessary for
-    // reallocating the swapchain on window resize without dropping while
-    // still preserving drop symantics that don't lead to double frees.
-    freed: bool,
 }
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
-        Self::init(window)
-    }
-
-    pub fn init(window: &Window) -> Result<Self, &'static str> {
         // Backend handle
         let instance =
             back::Instance::create(WINDOW_NAME, VERSION).map_err(|_| "Unsupported backend")?;
@@ -428,8 +389,8 @@ impl HalState {
             device.destroy_shader_module(frag);
         }
 
-        let vertices = create_buffer(&device, &adapter, array_size(&QUAD_DATA) as u64, Usage::VERTEX)?;
-        let indices = create_buffer(&device, &adapter, array_size(&QUAD_INDICES) as u64, Usage::INDEX)?;
+        let vertices = BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?;
+        let indices = BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?;
 
         Ok(Self {
             current_frame: 0,
@@ -454,17 +415,10 @@ impl HalState {
             graphics_pipeline: ManuallyDrop::new(graphics_pipeline),
 
             instance: ManuallyDrop::new(instance),
-            freed: false,
         })
     }
 
     pub fn draw_frame(&mut self, color: [f32; 4], mouse: Vec2) -> Result<(), &'static str> {
-        if self.freed {
-            Err("Use of freed Gfx state")
-        } else {
-            Ok(())
-        }?;
-
         let image_available = &self.image_available_semaphores[self.current_frame];
         let render_finished = &self.render_finished_semaphores[self.current_frame];
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
@@ -486,8 +440,8 @@ impl HalState {
         unsafe { self.device.reset_fence(flight_fence) }
             .map_err(|_| "Failed to reset the fence")?;
 
-        send_buffer_data(&self.device, &self.vertices, &QUAD_DATA);
-        send_buffer_data(&self.device, &self.indices, &QUAD_INDICES);
+        self.vertices.load_data(&self.device, &QUAD_DATA)?;
+        self.indices.load_data(&self.device, &QUAD_INDICES)?;
 
         let commands = &mut self.command_buffers[image_i];
         let clear_values = [ClearValue {
@@ -547,11 +501,6 @@ impl HalState {
     }
 
     pub fn free(&mut self) {
-        if self.freed {
-            return;
-        }
-        self.freed = true;
-
         let _ = self.device.wait_idle();
 
         // Don't need to destroy command buffers,
@@ -637,65 +586,4 @@ fn compile_shader(
         })?;
     unsafe { device.create_shader_module(spirv.as_binary()) }
         .map_err(|_| "Failed to create shader module")
-}
-
-fn create_buffer(
-    device: &back::Device,
-    adapter: &Adapter<back::Backend>,
-    bytes: u64,
-    usage: Usage,
-) -> Result<BufferInfo, &'static str> {
-    let mut buffer = unsafe { device.create_buffer(bytes, usage) }
-        .map_err(|_| "Failed to create a buffer for the vertices")?;
-
-    // Creation of the buffer does not imply allocation.
-    // We can now query it's prerequistes and allocate memory to match.
-    let requirements = unsafe { device.get_buffer_requirements(&buffer) };
-
-    // Find id of CPU-visible memory for vertex buffer
-    let memory_type_id = adapter
-        .physical_device
-        .memory_properties()
-        .memory_types
-        .iter()
-        .enumerate()
-        .find(|&(id, memory_type)| {
-            requirements.type_mask & (1 << id) != 0
-                && memory_type.properties.contains(Properties::CPU_VISIBLE)
-        })
-        .map(|(id, _)| MemoryTypeId(id))
-        .ok_or("Failed to find a memory type to support the vertex buffer")?;
-
-    // Allocate vertex buffer
-    let memory = unsafe { device.allocate_memory(memory_type_id, requirements.size) }
-        .map_err(|_| "Failed to allocate vertex buffer memory")?;
-
-    // Make the buffer use the allocation
-    unsafe { device.bind_buffer_memory(&memory, 0, &mut buffer) }
-        .map_err(|_| "Failed to bind the buffer memory")?;
-
-    Ok(BufferInfo::new(buffer, memory, requirements))
-}
-
-fn send_buffer_data<T>(device: &back::Device, info: &BufferInfo, data: &[T]) -> Result<(), &'static str> {
-    let mapped_memory = unsafe {
-        device
-            .map_memory(&info.memory, 0..info.requirements.size)
-    }
-    .map_err(|_| "Failed to memory map buffer")?;
-
-    unsafe {
-        std::ptr::copy(
-            data.as_ptr() as *const u8,
-            mapped_memory,
-            array_size(data),
-        );
-        device.unmap_memory(&info.memory)
-    }
-
-    Ok(())
-}
-
-fn array_size<T>(array: &[T]) -> usize {
-    array.len() * mem::size_of::<T>()
 }

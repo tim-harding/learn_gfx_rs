@@ -3,13 +3,15 @@ use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
+    buffer::Usage,
     command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
+    memory::Properties,
     pass::{
-        Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
-        SubpassDesc, Subpass
+        Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass,
+        SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
     // Pipeline state objects
@@ -28,6 +30,7 @@ use gfx_hal::{
     Backend,
     Features,
     Instance,
+    MemoryTypeId,
 };
 use shaderc::{Compiler, ShaderKind};
 use std::{
@@ -63,6 +66,9 @@ pub struct HalState {
     // still preserving drop symantics that don't lead to double frees.
     freed: bool,
 }
+
+const TRI_DATA: [f32; 6] = [-0.5, -0.5, 0.0, 0.5, 0.5, -0.5];
+const TRI_DATA_BYTES: u64 = (TRI_DATA.len() * mem::size_of::<f32>()) as u64;
 
 const VERT_PATH: &str = "shaders/vert.glsl";
 const FRAG_PATH: &str = "shaders/frag.glsl";
@@ -115,8 +121,8 @@ impl HalState {
                 .physical_device
                 // Request graphics queue with full priority and core features only
                 .open(&[(queue_family, &[1.0f32])], Features::empty())
-                .map_err(|_| "Could not open physical device")
-        }?;
+        }
+        .map_err(|_| "Could not open physical device")?;
 
         // Take ownership of contents so the gpu can go
         // out of scope while the queue group lives on
@@ -266,8 +272,6 @@ impl HalState {
 
         let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
 
-        // These can be destroyed at the end of the pipeline creation,
-        // rather than at the end of HalState's lifetime.
         let vert = compile_shader(VERT_PATH, &mut compiler, &device, ShaderKind::Vertex)?;
         let frag = compile_shader(FRAG_PATH, &mut compiler, &device, ShaderKind::Fragment)?;
 
@@ -377,6 +381,37 @@ impl HalState {
 
         let pipeline = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
             .map_err(|_| "Failed to create graphics pipeline")?;
+
+        unsafe {
+            // Not needed after pipeline is built
+            device.destroy_shader_module(vert);
+            device.destroy_shader_module(frag);
+        }
+
+        let mut buffer = unsafe { device.create_buffer(TRI_DATA_BYTES, Usage::VERTEX) }
+            .map_err(|_| "Failed to create a buffer for the vertices")?;
+
+        // Creation of the buffer does not imply allocation.
+        // We can now query it's prerequistes and allocate memory to match.
+        let requirements = unsafe { device.get_buffer_requirements(&buffer) };
+
+        // Find id of CPU-visible memory for vertex buffer
+        let memory_type_id = adapter
+            .physical_device
+            .memory_properties()
+            .memory_types
+            .iter()
+            .enumerate()
+            .find(|&(id, memory_type)| {
+                requirements.type_mask & (1 << id) != 0
+                    && memory_type.properties.contains(Properties::CPU_VISIBLE)
+            })
+            .map(|(id, _)| MemoryTypeId(id))
+            .ok_or("Couldn't find a memory type to support the vertex buffer!")?;
+
+        // Allocate vertex buffer
+        let memory = unsafe { device.allocate_memory(memory_type_id, requirements.size) }
+            .map_err(|_| "Couldn't allocate vertex buffer memory")?;
 
         Ok(Self {
             current_frame: 0,

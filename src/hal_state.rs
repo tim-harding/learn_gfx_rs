@@ -14,11 +14,11 @@ use gfx_hal::{
     },
     pool::{CommandPool, CommandPoolCreateFlags},
     pso::{
-        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendState, ColorBlendDesc,
-        ColorMask, DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint,
-        GraphicsPipelineDesc, GraphicsShaderSet, InputAssemblerDesc, LogicOp,
-        PipelineCreationFlags, PipelineStage, Primitive, Rasterizer, Rect, ShaderStageFlags,
-        Specialization, VertexBufferDesc, VertexInputRate, Viewport,
+        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendState, ColorBlendDesc, ColorMask,
+        DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint, GraphicsPipelineDesc,
+        GraphicsShaderSet, InputAssemblerDesc, LogicOp, PipelineCreationFlags, PipelineStage,
+        Primitive, Rasterizer, Rect, ShaderStageFlags, Specialization, VertexBufferDesc,
+        VertexInputRate, Viewport,
     },
     queue::{
         family::{QueueFamily, QueueGroup},
@@ -67,7 +67,12 @@ pub struct HalState {
     freed: bool,
 }
 
-const TRI_DATA: [f32; 6] = [-0.5, -0.5, 0.0, 0.5, 0.5, -0.5];
+#[rustfmt::skip]
+const TRI_DATA: [f32; 15] = [
+    -0.5, -0.5, 1.0, 0.0, 0.0,
+     0.0,  0.5, 0.0, 1.0, 0.0,
+     0.5, -0.5, 0.0, 0.0, 1.0,
+];
 const TRI_DATA_BYTES: usize = TRI_DATA.len() * mem::size_of::<f32>();
 
 const VERT_PATH: &str = "shaders/vert.glsl";
@@ -297,25 +302,44 @@ impl HalState {
             restart_index: None,
         };
 
-        let vertex_buffers = vec![VertexBufferDesc {
-            // Not the location listed on the shader,
-            // this is just a unique id for the buffer
-            binding: 0,
-            stride: (mem::size_of::<f32>() * 2) as u32,
-            rate: VertexInputRate::Vertex,
-        }];
-
-        let attributes = vec![AttributeDesc {
-            // This is the attribute location in the shader
-            location: 0,
-            // Matches vertex buffer description
-            binding: 0,
-            element: Element {
-                // Float vec2
-                format: Format::Rg32Sfloat,
-                offset: 0,
+        let vertex_buffers = vec![
+            VertexBufferDesc {
+                // Not the location listed on the shader,
+                // this is just a unique id for the buffer
+                binding: 0,
+                stride: (mem::size_of::<f32>() * 5) as u32,
+                rate: VertexInputRate::Vertex,
             },
-        }];
+            /*
+            VertexBufferDesc {
+                binding: 1,
+                stride: (mem::size_of::<f32>() * 5) as u32,
+                rate: VertexInputRate::Vertex,
+            },
+            */
+        ];
+
+        let attributes = vec![
+            AttributeDesc {
+                // This is the attribute location in the shader
+                location: 0,
+                // Matches vertex buffer description
+                binding: 0,
+                element: Element {
+                    // Float vec2
+                    format: Format::Rg32Sfloat,
+                    offset: 0,
+                },
+            },
+            AttributeDesc {
+                location: 1,
+                binding: 0,
+                element: Element {
+                    format: Format::Rgb32Sfloat,
+                    offset: (2 * mem::size_of::<f32>()) as u32,
+                },
+            },
+        ];
 
         // No depth test for now
         let depth_stencil = DepthStencilDesc {
@@ -328,7 +352,7 @@ impl HalState {
             logic_op: Some(LogicOp::Copy),
             targets: vec![ColorBlendDesc {
                 mask: ColorMask::ALL,
-                blend: Some(BlendState::ADD),
+                blend: Some(BlendState::ALPHA),
             }],
         };
 

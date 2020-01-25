@@ -30,7 +30,7 @@ fn main() -> Result<(), &'static str> {
                 message
             ))
         })
-        .level(log::LevelFilter::Warn)
+        .level(log::LevelFilter::Error)
         .chain(std::io::stdout())
         .apply()
         .map_err(|_| "Failed to start logger")?;

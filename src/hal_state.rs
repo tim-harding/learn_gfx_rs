@@ -1,6 +1,6 @@
 use crate::{
-    utils::{self, Vec2},
     pipeline_info,
+    utils::{self, Vec2},
     BufferInfo, PipelineInfo,
 };
 use arrayvec::ArrayVec;

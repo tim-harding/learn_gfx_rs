@@ -15,6 +15,7 @@ layout (location = 0) out gl_PerVertex {
 layout (location = 1) out vec3 frag_color;
 
 void main() {
-    gl_Position = vec4(position, 0.0, 1.0);
-    frag_color = color * vec3(push.mouse_x, push.mouse_y, 1.0);
+    vec2 offset = vec2(push.mouse_x, push.mouse_y) - vec2(0.5);
+    gl_Position = vec4(position + offset, 0.0, 1.0);
+    frag_color = color;
 }

@@ -1,7 +1,6 @@
 use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
-    adapter::Adapter,
     adapter::{Gpu, PhysicalDevice},
     buffer::Usage,
     command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
@@ -15,7 +14,7 @@ use gfx_hal::{
     },
     pool::{CommandPool, CommandPoolCreateFlags},
     pso::{
-        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendOp, BlendState, ColorBlendDesc,
+        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendState, ColorBlendDesc,
         ColorMask, DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint,
         GraphicsPipelineDesc, GraphicsShaderSet, InputAssemblerDesc, LogicOp,
         PipelineCreationFlags, PipelineStage, Primitive, Rasterizer, Rect, ShaderStageFlags,
@@ -58,8 +57,6 @@ pub struct HalState {
     graphics_pipeline: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
     requirements: Requirements,
 
-    adapter: Adapter<back::Backend>,
-    surface: <back::Backend as Backend>::Surface,
     instance: ManuallyDrop<back::Instance>,
 
     // It would be preferrable to use drop symantics exclusively,
@@ -441,10 +438,7 @@ impl HalState {
             graphics_pipeline: ManuallyDrop::new(graphics_pipeline),
             requirements,
 
-            adapter,
-            surface,
             instance: ManuallyDrop::new(instance),
-
             freed: false,
         })
     }
@@ -478,7 +472,7 @@ impl HalState {
             .map_err(|_| "Failed to reset the fence")?;
 
         // Copy triangle data to the GPU every frame for simplicity.
-        let mut mapped_memory = unsafe {
+        let mapped_memory = unsafe {
             self.device
                 .map_memory(&self.memory, 0..self.requirements.size)
         }

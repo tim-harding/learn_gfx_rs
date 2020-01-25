@@ -8,13 +8,12 @@ use gfx_hal::{
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
-    memory::Properties,
+    memory::{Properties, Requirements},
     pass::{
         Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass,
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    // Pipeline state objects
     pso::{
         AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendOp, BlendState, ColorBlendDesc,
         ColorMask, DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint,
@@ -54,6 +53,13 @@ pub struct HalState {
     queue_group: ManuallyDrop<QueueGroup<back::Backend>>,
     swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
     device: ManuallyDrop<back::Device>,
+
+    buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
+    memory: ManuallyDrop<<back::Backend as Backend>::Memory>,
+    descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout>,
+    pipeline_layout: ManuallyDrop<<back::Backend as Backend>::PipelineLayout>,
+    graphics_pipeline: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
+    requirements: Requirements,
 
     adapter: Adapter<back::Backend>,
     surface: <back::Backend as Backend>::Surface,
@@ -356,7 +362,7 @@ impl HalState {
                 .map_err(|_| "Failed to create a descriptor set layout")?,
         ];
         let push_constants = Vec::<(ShaderStageFlags, Range<u32>)>::new();
-        let layout =
+        let pipeline_layout =
             unsafe { device.create_pipeline_layout(&descriptor_set_layouts, push_constants) }
                 .map_err(|_| "Failed to create a pipeline layout")?;
 
@@ -370,7 +376,7 @@ impl HalState {
             depth_stencil,
             multisampling: None,
             baked_states,
-            layout: &layout,
+            layout: &pipeline_layout,
             subpass: Subpass {
                 index: 0,
                 main_pass: &render_pass,
@@ -379,7 +385,7 @@ impl HalState {
             parent: BasePipeline::None,
         };
 
-        let pipeline = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
+        let graphics_pipeline = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
             .map_err(|_| "Failed to create graphics pipeline")?;
 
         unsafe {
@@ -427,6 +433,13 @@ impl HalState {
             queue_group: ManuallyDrop::new(queue_group),
             swapchain: ManuallyDrop::new(swapchain),
             device: ManuallyDrop::new(device),
+
+            buffer: ManuallyDrop::new(buffer),
+            memory: ManuallyDrop::new(memory),
+            descriptor_set_layouts,
+            pipeline_layout: ManuallyDrop::new(pipeline_layout),
+            graphics_pipeline: ManuallyDrop::new(graphics_pipeline),
+            requirements,
 
             adapter,
             surface,
@@ -532,6 +545,10 @@ impl HalState {
             unsafe { self.device.destroy_image_view(view) }
         }
 
+        for layout in self.descriptor_set_layouts.drain(..) {
+            unsafe { self.device.destroy_descriptor_set_layout(layout) }
+        }
+
         unsafe {
             self.device
                 .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&self.command_pool)));
@@ -539,6 +556,14 @@ impl HalState {
                 .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&self.render_pass)));
             self.device
                 .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&self.swapchain)));
+            self.device
+                .destroy_buffer(ManuallyDrop::into_inner(ptr::read(&self.buffer)));
+            self.device
+                .free_memory(ManuallyDrop::into_inner(ptr::read(&self.memory)));
+            self.device
+                .destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(&self.pipeline_layout)));
+            self.device
+                .destroy_graphics_pipeline(ManuallyDrop::into_inner(ptr::read(&self.graphics_pipeline)));
 
             ManuallyDrop::drop(&mut self.queue_group);
             ManuallyDrop::drop(&mut self.device);

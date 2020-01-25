@@ -25,17 +25,14 @@ pub struct PipelineInfo {
     pub handle: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
 }
 
-// To be replaced as more upstream stuff is bundled up
-pub struct CreationInfo<'a> {
-    pub device: &'a back::Device,
-    pub subpass: Subpass<'a, back::Backend>,
-    pub content_size: Rect,
-}
-
 impl PipelineInfo {
-    pub fn new(info: CreationInfo) -> Result<Self, &'static str> {
+    pub fn new(
+        device: &back::Device,
+        subpass: Subpass<back::Backend>,
+        content_size: Rect,
+    ) -> Result<Self, &'static str> {
         let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
-        let mut compile = |src, kind| compile_shader(src, &mut compiler, &info.device, kind);
+        let mut compile = |src, kind| compile_shader(src, &mut compiler, &device, kind);
         let vert = compile("shaders/vert.glsl", ShaderKind::Vertex)?;
         let frag = compile("shaders/frag.glsl", ShaderKind::Fragment)?;
 
@@ -45,7 +42,7 @@ impl PipelineInfo {
         // bits and bobs.
         let descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout> =
             vec![unsafe {
-                info.device.create_descriptor_set_layout(
+                device.create_descriptor_set_layout(
                     Vec::<DescriptorSetLayoutBinding>::new(),
                     Vec::<<back::Backend as Backend>::Sampler>::new(),
                 )
@@ -53,7 +50,7 @@ impl PipelineInfo {
             .map_err(|_| "Failed to create a descriptor set layout")?];
 
         let layout = unsafe {
-            info.device.create_pipeline_layout(
+            device.create_pipeline_layout(
                 &descriptor_set_layouts,
                 Vec::<(ShaderStageFlags, Range<u32>)>::new(),
             )
@@ -77,8 +74,6 @@ impl PipelineInfo {
                     specialization: Specialization::EMPTY,
                 }),
             },
-
-            rasterizer: Rasterizer::FILL,
 
             vertex_buffers: vec![VertexBufferDesc {
                 // Not the location listed on the shader,
@@ -123,27 +118,28 @@ impl PipelineInfo {
             multisampling: None,
             baked_states: BakedStates {
                 viewport: Some(Viewport {
-                    rect: info.content_size,
+                    rect: content_size,
                     depth: 0.0..1.0,
                 }),
-                scissor: Some(info.content_size),
+                scissor: Some(content_size),
                 blend_color: None,
                 depth_bounds: None,
             },
 
+            rasterizer: Rasterizer::FILL,
             layout: &layout,
-            subpass: info.subpass,
+            subpass: subpass,
             flags: PipelineCreationFlags::empty(),
             parent: BasePipeline::None,
         };
 
-        let handle = unsafe { info.device.create_graphics_pipeline(&pipeline_desc, None) }
+        let handle = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
             .map_err(|_| "Failed to create graphics pipeline")?;
 
         unsafe {
             // Not needed after pipeline is built
-            info.device.destroy_shader_module(vert);
-            info.device.destroy_shader_module(frag);
+            device.destroy_shader_module(vert);
+            device.destroy_shader_module(frag);
         }
 
         Ok(Self {

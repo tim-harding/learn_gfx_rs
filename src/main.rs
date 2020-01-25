@@ -14,8 +14,7 @@ use utils::Vec2;
 mod buffer_info;
 pub use buffer_info::BufferInfo;
 
-// Should probably be private once CreationInfo is no more
-pub mod pipeline_info;
+mod pipeline_info;
 pub use pipeline_info::PipelineInfo;
 
 #[derive(Default, Copy, Clone)]

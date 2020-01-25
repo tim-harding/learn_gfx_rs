@@ -257,14 +257,14 @@ impl HalState {
             .collect::<Vec<_>>();
 
         let content_size = content_size.to_extent().rect();
-        let pipeline = PipelineInfo::new(pipeline_info::CreationInfo {
-            device: &device,
-            subpass: pass::Subpass {
+        let pipeline = PipelineInfo::new(
+            &device,
+            pass::Subpass {
                 index: 0,
                 main_pass: &render_pass,
             },
-            content_size: content_size,
-        })?;
+            content_size,
+        )?;
 
         let vertices = BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?;
         let indices = BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?;

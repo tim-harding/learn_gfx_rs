@@ -1,5 +1,4 @@
 use crate::{
-    pipeline_info,
     utils::{self, Vec2},
     BufferInfo, PipelineInfo,
 };
@@ -145,55 +144,41 @@ impl HalState {
             unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
                 .map_err(|_| "Could not create swapchain")?;
 
-        // Semaphores provide GPU-side syncronization
-        let make_semaphore = || {
-            device
-                .create_semaphore()
-                .map_err(|_| "Could not create semaphore")
-        };
-
-        // Image available flagged when...
-        let image_available_semaphores = flight(make_semaphore)?;
-
-        // Render finished flagged when...
-        let render_finished_semaphores = flight(make_semaphore)?;
-
-        // In flight fences flagged when...
-        let in_flight_fences = flight(|| {
-            device
-                .create_fence(true)
-                .map_err(|_| "Could not create fence")
-        })?;
-
-        // Describes a render target,
-        // to be attached as input or output
-        let attachment = Attachment {
-            format: Some(FORMAT),
-            // Don't have MSAA yet anyway
-            samples: 1,
-            // Clear the render target to the clear color and preserve the result
-            ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
-            stencil_ops: AttachmentOps::DONT_CARE,
-            // Begin uninitialized, end ready to present
-            layouts: AttachmentLayout::Undefined..AttachmentLayout::Present,
-        };
-
-        // Render pass stage, distinct from multipass rendering
-        let subpass = SubpassDesc {
-            // Zero is color attachment ID
-            colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
-            depth_stencil: None,
-            inputs: &[],
-            // For MSAA
-            resolves: &[],
-            // Attachments not used by subpass but which must preserved
-            preserves: &[],
-        };
-
         // Collection of subpasses,
         // defines which attachment will be written
-        let render_pass = unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
-            .map_err(|_| "Could not create render pass")?;
+        let render_pass = unsafe {
+            device.create_render_pass(
+                &[
+                    // Describes a render target,
+                    // to be attached as input or output
+                    Attachment {
+                        format: Some(FORMAT),
+                        // Don't have MSAA yet anyway
+                        samples: 1,
+                        // Clear the render target to the clear color and preserve the result
+                        ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
+                        stencil_ops: AttachmentOps::DONT_CARE,
+                        // Begin uninitialized, end ready to present
+                        layouts: AttachmentLayout::Undefined..AttachmentLayout::Present,
+                    },
+                ],
+                &[
+                    // Render pass stage, distinct from multipass rendering
+                    SubpassDesc {
+                        // Zero is color attachment ID
+                        colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
+                        depth_stencil: None,
+                        inputs: &[],
+                        // For MSAA
+                        resolves: &[],
+                        // Attachments not used by subpass but which must preserved
+                        preserves: &[],
+                    },
+                ],
+                &[],
+            )
+        }
+        .map_err(|_| "Could not create render pass")?;
 
         // Describe access to the underlying image memory,
         // possibly a subregion
@@ -249,44 +234,51 @@ impl HalState {
         }
         .map_err(|_| "Could not create command pool")?;
 
-        // Used to build up lists of commands for execution
-        let command_buffers = framebuffers
-            .iter()
-            // Primary command buffers cannot be reused across sub passes
-            .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
-            .collect::<Vec<_>>();
-
         let content_size = content_size.to_extent().rect();
-        let pipeline = PipelineInfo::new(
-            &device,
-            pass::Subpass {
-                index: 0,
-                main_pass: &render_pass,
-            },
-            content_size,
-        )?;
 
-        let vertices = BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?;
-        let indices = BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?;
+        let make_semaphore = || {
+            device
+                .create_semaphore()
+                .map_err(|_| "Could not create semaphore")
+        };
 
         Ok(Self {
-            current_frame: 0,
-            in_flight_fences,
-            render_finished_semaphores,
-            image_available_semaphores,
-            command_buffers,
+            image_available_semaphores: flight(make_semaphore)?,
+            render_finished_semaphores: flight(make_semaphore)?,
+            in_flight_fences: flight(|| {
+                device
+                    .create_fence(true)
+                    .map_err(|_| "Could not create fence")
+            })?,
+
+            command_buffers: framebuffers
+                .iter()
+                // Primary command buffers cannot be reused across sub passes
+                .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
+                .collect::<Vec<_>>(),
+
+            pipeline: PipelineInfo::new(
+                &device,
+                pass::Subpass {
+                    index: 0,
+                    main_pass: &render_pass,
+                },
+                content_size,
+            )?,
+
+            vertices: BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?,
+            indices: BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?,
+
             command_pool: ManuallyDrop::new(command_pool),
+            render_pass: ManuallyDrop::new(render_pass),
+            swapchain: ManuallyDrop::new(swapchain),
+
+            current_frame: 0,
+            content_size,
+            queue_group,
             framebuffers,
             image_views,
-            render_pass: ManuallyDrop::new(render_pass),
-            content_size,
-            swapchain: ManuallyDrop::new(swapchain),
             device,
-
-            queue_group,
-            pipeline,
-            vertices,
-            indices,
         })
     }
 

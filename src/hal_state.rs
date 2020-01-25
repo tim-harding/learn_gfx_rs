@@ -1,4 +1,8 @@
-use crate::{utils::Vec2, BufferInfo};
+use crate::{
+    utils::{self, Vec2},
+    pipeline_info,
+    BufferInfo, PipelineInfo,
+};
 use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
@@ -9,28 +13,21 @@ use gfx_hal::{
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
     pass::{
-        Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass,
+        self, Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    pso::{
-        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendState, ColorBlendDesc, ColorMask,
-        DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint, GraphicsPipelineDesc,
-        GraphicsShaderSet, InputAssemblerDesc, LogicOp, PipelineCreationFlags, PipelineStage,
-        Primitive, Rasterizer, Rect, ShaderStageFlags, Specialization, VertexBufferDesc,
-        VertexInputRate, Viewport,
-    },
+    pso::{PipelineStage, Rect, ShaderStageFlags},
     queue::{
         family::{QueueFamily, QueueGroup},
         CommandQueue, Submission,
     },
     window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
-    Backend, Features, IndexType, Instance
+    Backend, Features, IndexType, Instance,
 };
-use shaderc::{Compiler, ShaderKind};
 use std::{
     mem::{self, ManuallyDrop},
-    ops::{Drop, Range},
+    ops::Drop,
     ptr,
 };
 use winit::window::Window;
@@ -49,20 +46,15 @@ const QUAD_INDICES: [u16; 6] = [
     0, 2, 3,
 ];
 
-const VERT_PATH: &str = "shaders/vert.glsl";
-const FRAG_PATH: &str = "shaders/frag.glsl";
-
-// Should move this where Winit can use it too
-const VERSION: u32 = 1;
-const WINDOW_NAME: &str = "Learn Gfx";
-
 // Matches mailbox presentation, which
 // uses three images for vsync
 const FRAMES_IN_FLIGHT: usize = 3;
-
 const FORMAT: Format = Format::Rgba8Srgb;
 
 pub struct HalState {
+    queue_group: QueueGroup<back::Backend>,
+    device: back::Device,
+
     current_frame: usize,
     in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
     render_finished_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
@@ -72,28 +64,23 @@ pub struct HalState {
     framebuffers: Vec<<back::Backend as Backend>::Framebuffer>,
     image_views: Vec<<back::Backend as Backend>::ImageView>,
     render_pass: ManuallyDrop<<back::Backend as Backend>::RenderPass>,
-    render_area: Rect,
-    queue_group: ManuallyDrop<QueueGroup<back::Backend>>,
+    content_size: Rect,
     swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
-    device: ManuallyDrop<back::Device>,
+
+    pipeline: PipelineInfo,
 
     vertices: BufferInfo,
     indices: BufferInfo,
-
-    descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout>,
-    pipeline_layout: ManuallyDrop<<back::Backend as Backend>::PipelineLayout>,
-    graphics_pipeline: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
-
-    instance: ManuallyDrop<back::Instance>,
 }
 
 impl HalState {
     pub fn new(window: &Window) -> Result<Self, &'static str> {
         // Backend handle
         let instance =
-            back::Instance::create(WINDOW_NAME, VERSION).map_err(|_| "Unsupported backend")?;
+            back::Instance::create(utils::WINDOW_NAME, 1).map_err(|_| "Unsupported backend")?;
 
         // Window drawing surface
+        // TODO: Does this need to be paired with a destroy_surface call?
         let mut surface = unsafe { instance.create_surface(window) }
             .map_err(|_| "Could not get drawing surface")?;
 
@@ -269,125 +256,15 @@ impl HalState {
             .map(|_| unsafe { command_pool.allocate_one(Level::Primary) })
             .collect::<Vec<_>>();
 
-        let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
-
-        let vert = compile_shader(VERT_PATH, &mut compiler, &device, ShaderKind::Vertex)?;
-        let frag = compile_shader(FRAG_PATH, &mut compiler, &device, ShaderKind::Fragment)?;
-
-        let shaders = GraphicsShaderSet::<back::Backend> {
-            vertex: EntryPoint {
-                entry: "main",
-                module: &vert,
-                // Not sure what this is used for
-                specialization: Specialization::EMPTY,
-            },
-            domain: None,
-            geometry: None,
-            hull: None,
-            fragment: Some(EntryPoint {
-                entry: "main",
-                module: &frag,
-                specialization: Specialization::EMPTY,
-            }),
-        };
-
-        let input_assembler = InputAssemblerDesc {
-            primitive: Primitive::TriangleList,
-            with_adjacency: false,
-            restart_index: None,
-        };
-
-        let vertex_buffers = vec![VertexBufferDesc {
-            // Not the location listed on the shader,
-            // this is just a unique id for the buffer
-            binding: 0,
-            stride: (mem::size_of::<f32>() * 2) as u32,
-            rate: VertexInputRate::Vertex,
-        }];
-
-        let attributes = vec![
-            AttributeDesc {
-                // This is the attribute location in the shader
-                location: 0,
-                // Matches vertex buffer description
-                binding: 0,
-                element: Element {
-                    // Float vec2
-                    format: Format::Rg32Sfloat,
-                    offset: 0,
-                },
-            },
-        ];
-
-        // No depth test for now
-        let depth_stencil = DepthStencilDesc {
-            depth: None,
-            depth_bounds: false,
-            stencil: None,
-        };
-
-        let blender = BlendDesc {
-            logic_op: Some(LogicOp::Copy),
-            targets: vec![ColorBlendDesc {
-                mask: ColorMask::ALL,
-                blend: Some(BlendState::ALPHA),
-            }],
-        };
-
-        let render_area = content_size.to_extent().rect();
-        // Baked-in pipeline attributes
-        let baked_states = BakedStates {
-            viewport: Some(Viewport {
-                rect: render_area,
-                depth: 0.0..1.0,
-            }),
-            scissor: Some(render_area),
-            blend_color: None,
-            depth_bounds: None,
-        };
-
-        // This machinery is only used when graphics pipeline data
-        // comes from somewhere other than the vertex buffer.
-        // We still have to explicitly declare all these empty
-        // bits and bobs.
-        let bindings = Vec::<DescriptorSetLayoutBinding>::new();
-        let immutable_samplers = Vec::<<back::Backend as Backend>::Sampler>::new();
-        let descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout> = vec![
-            unsafe { device.create_descriptor_set_layout(bindings, immutable_samplers) }
-                .map_err(|_| "Failed to create a descriptor set layout")?,
-        ];
-        let push_constants = Vec::<(ShaderStageFlags, Range<u32>)>::new();
-        let pipeline_layout =
-            unsafe { device.create_pipeline_layout(&descriptor_set_layouts, push_constants) }
-                .map_err(|_| "Failed to create a pipeline layout")?;
-
-        let pipeline_desc = GraphicsPipelineDesc {
-            shaders,
-            rasterizer: Rasterizer::FILL,
-            vertex_buffers,
-            attributes,
-            input_assembler,
-            blender,
-            depth_stencil,
-            multisampling: None,
-            baked_states,
-            layout: &pipeline_layout,
-            subpass: Subpass {
+        let content_size = content_size.to_extent().rect();
+        let pipeline = PipelineInfo::new(pipeline_info::CreationInfo {
+            device: &device,
+            subpass: pass::Subpass {
                 index: 0,
                 main_pass: &render_pass,
             },
-            flags: PipelineCreationFlags::empty(),
-            parent: BasePipeline::None,
-        };
-
-        let graphics_pipeline = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
-            .map_err(|_| "Failed to create graphics pipeline")?;
-
-        unsafe {
-            // Not needed after pipeline is built
-            device.destroy_shader_module(vert);
-            device.destroy_shader_module(frag);
-        }
+            content_size: content_size,
+        })?;
 
         let vertices = BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?;
         let indices = BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?;
@@ -402,19 +279,14 @@ impl HalState {
             framebuffers,
             image_views,
             render_pass: ManuallyDrop::new(render_pass),
-            render_area,
-            queue_group: ManuallyDrop::new(queue_group),
+            content_size,
             swapchain: ManuallyDrop::new(swapchain),
-            device: ManuallyDrop::new(device),
+            device,
 
+            queue_group,
+            pipeline,
             vertices,
             indices,
-
-            descriptor_set_layouts,
-            pipeline_layout: ManuallyDrop::new(pipeline_layout),
-            graphics_pipeline: ManuallyDrop::new(graphics_pipeline),
-
-            instance: ManuallyDrop::new(instance),
         })
     }
 
@@ -454,7 +326,7 @@ impl HalState {
             let mouse_x = mem::transmute::<f32, u32>(mouse.x);
             let mouse_y = mem::transmute::<f32, u32>(mouse.y);
             commands.begin_primary(CommandBufferFlags::EMPTY);
-            commands.bind_graphics_pipeline(&self.graphics_pipeline);
+            commands.bind_graphics_pipeline(&self.pipeline.handle);
             commands.bind_vertex_buffers(0, buffers);
             commands.bind_index_buffer(IndexBufferView {
                 buffer: &self.indices.buffer,
@@ -462,7 +334,7 @@ impl HalState {
                 index_type: IndexType::U16,
             });
             commands.push_graphics_constants(
-                &self.pipeline_layout,
+                &self.pipeline.layout,
                 ShaderStageFlags::VERTEX,
                 0,
                 &[mouse_x, mouse_y],
@@ -470,7 +342,7 @@ impl HalState {
             commands.begin_render_pass(
                 &self.render_pass,
                 &self.framebuffers[image_i],
-                self.render_area,
+                self.content_size,
                 clear_values.iter(),
                 SubpassContents::Inline,
             );
@@ -526,12 +398,9 @@ impl HalState {
             unsafe { self.device.destroy_image_view(view) }
         }
 
-        for layout in self.descriptor_set_layouts.drain(..) {
-            unsafe { self.device.destroy_descriptor_set_layout(layout) }
-        }
-
         self.vertices.free(&self.device);
         self.indices.free(&self.device);
+        self.pipeline.free(&self.device);
 
         unsafe {
             self.device
@@ -540,18 +409,6 @@ impl HalState {
                 .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&self.render_pass)));
             self.device
                 .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&self.swapchain)));
-            self.device
-                .destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(
-                    &self.pipeline_layout,
-                )));
-            self.device
-                .destroy_graphics_pipeline(ManuallyDrop::into_inner(ptr::read(
-                    &self.graphics_pipeline,
-                )));
-
-            ManuallyDrop::drop(&mut self.queue_group);
-            ManuallyDrop::drop(&mut self.device);
-            ManuallyDrop::drop(&mut self.instance);
         }
     }
 }
@@ -569,21 +426,4 @@ where
     (0..FRAMES_IN_FLIGHT)
         .map(|_| cb())
         .collect::<Result<Vec<_>, _>>()
-}
-
-fn compile_shader(
-    src_file: &str,
-    compiler: &mut Compiler,
-    device: &back::Device,
-    kind: ShaderKind,
-) -> Result<<back::Backend as Backend>::ShaderModule, &'static str> {
-    let src = std::fs::read_to_string(src_file).map_err(|_| "Could not read shader source file")?;
-    let spirv = compiler
-        .compile_into_spirv(&src, kind, src_file, "main", None)
-        .map_err(|e| {
-            log::error!("{}", e);
-            "Failed to compile fragment program"
-        })?;
-    unsafe { device.create_shader_module(spirv.as_binary()) }
-        .map_err(|_| "Failed to create shader module")
 }

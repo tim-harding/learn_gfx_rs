@@ -14,6 +14,10 @@ use utils::Vec2;
 mod buffer_info;
 pub use buffer_info::BufferInfo;
 
+// Should probably be private once CreationInfo is no more
+pub mod pipeline_info;
+pub use pipeline_info::PipelineInfo;
+
 #[derive(Default, Copy, Clone)]
 struct InputState {
     pub mouse: Vec2,
@@ -36,7 +40,10 @@ fn main() -> Result<(), &'static str> {
         .map_err(|_| "Failed to start logger")?;
 
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window = WindowBuilder::new()
+        .with_title(utils::WINDOW_NAME)
+        .build(&event_loop)
+        .unwrap();
 
     let mut hal_state = HalState::new(&window)?;
     let mut input_state = InputState::default();

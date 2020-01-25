@@ -1,15 +1,12 @@
 use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::{Adapter, PhysicalDevice},
-    buffer::{Usage},
+    buffer::Usage,
     device::Device,
     memory::{Properties, Requirements},
     Backend, MemoryTypeId,
 };
-use std::{
-    mem::{ManuallyDrop},
-    ptr,
-};
+use std::{mem::ManuallyDrop, ptr};
 
 pub struct BufferInfo {
     pub buffer: ManuallyDrop<<back::Backend as Backend>::Buffer>,
@@ -53,26 +50,19 @@ impl BufferInfo {
         unsafe { device.bind_buffer_memory(&memory, 0, &mut buffer) }
             .map_err(|_| "Failed to bind the buffer memory")?;
 
-        Ok(Self{
-            buffer: ManuallyDrop::new(buffer), 
-            memory: ManuallyDrop::new(memory), 
-            requirements
+        Ok(Self {
+            buffer: ManuallyDrop::new(buffer),
+            memory: ManuallyDrop::new(memory),
+            requirements,
         })
     }
 
     pub fn load_data<T>(&self, device: &back::Device, data: &[T]) -> Result<(), &'static str> {
-        let mapped_memory = unsafe {
-            device
-                .map_memory(&self.memory, 0..self.requirements.size)
-        }
-        .map_err(|_| "Failed to memory map buffer")?;
+        let mapped_memory = unsafe { device.map_memory(&self.memory, 0..self.requirements.size) }
+            .map_err(|_| "Failed to memory map buffer")?;
 
         unsafe {
-            std::ptr::copy(
-                data.as_ptr() as *const u8,
-                mapped_memory,
-                array_size(data),
-            );
+            std::ptr::copy(data.as_ptr() as *const u8, mapped_memory, array_size(data));
             device.unmap_memory(&self.memory)
         }
 

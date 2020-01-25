@@ -17,6 +17,9 @@ pub use buffer_info::BufferInfo;
 mod pipeline_info;
 pub use pipeline_info::PipelineInfo;
 
+mod image_info;
+pub use image_info::ImageInfo;
+
 #[derive(Default, Copy, Clone)]
 struct InputState {
     pub mouse: Vec2,

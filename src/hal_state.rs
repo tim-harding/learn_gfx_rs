@@ -409,11 +409,15 @@ impl HalState {
                     && memory_type.properties.contains(Properties::CPU_VISIBLE)
             })
             .map(|(id, _)| MemoryTypeId(id))
-            .ok_or("Couldn't find a memory type to support the vertex buffer!")?;
+            .ok_or("Failed to find a memory type to support the vertex buffer")?;
 
         // Allocate vertex buffer
         let memory = unsafe { device.allocate_memory(memory_type_id, requirements.size) }
-            .map_err(|_| "Couldn't allocate vertex buffer memory")?;
+            .map_err(|_| "Failed to allocate vertex buffer memory")?;
+
+        // Make the buffer use the allocation
+        unsafe { device.bind_buffer_memory(&memory, 0, &mut buffer) }
+            .map_err(|_| "Failed to bind the buffer memory")?;
 
         Ok(Self {
             current_frame: 0,
@@ -489,27 +493,28 @@ impl HalState {
             self.device.unmap_memory(&self.memory)
         }
 
-        let buffer = &mut self.command_buffers[image_i];
+        let commands = &mut self.command_buffers[image_i];
         let clear_values = [ClearValue {
             color: ClearColor { float32: color },
         }];
+        // Here we must force the Deref impl of ManuallyDrop to play nice.
+        let buffer_ref: &<back::Backend as Backend>::Buffer = &self.buffer;
+        let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
         unsafe {
-            buffer.begin_primary(CommandBufferFlags::EMPTY);
-            buffer.begin_render_pass(
+            commands.begin_primary(CommandBufferFlags::EMPTY);
+            commands.bind_graphics_pipeline(&self.graphics_pipeline);
+            commands.bind_vertex_buffers(0, buffers);
+            commands.begin_render_pass(
                 &self.render_pass,
                 &self.framebuffers[image_i],
                 self.render_area,
                 clear_values.iter(),
                 SubpassContents::Inline,
             );
-            buffer.bind_graphics_pipeline(&self.graphics_pipeline);
-            // Here we must force the Deref impl of ManuallyDrop to play nice.
-            let buffer_ref: &<back::Backend as Backend>::Buffer = &self.buffer;
-            let buffers: ArrayVec<[_; 1]> = [(buffer_ref, 0)].into();
-            buffer.bind_vertex_buffers(0, buffers);
             // Three verts, one instance
-            buffer.draw(0..3, 0..1);
-            buffer.finish();
+            commands.draw(0..3, 0..1);
+            commands.end_render_pass();
+            commands.finish();
         }
 
         let command_buffers = &self.command_buffers.get(image_i);

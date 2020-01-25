@@ -41,6 +41,7 @@ fn main() -> Result<(), &'static str> {
     let mut hal_state = HalState::new(&window)?;
     let mut input_state = InputState::default();
 
+    render(&mut hal_state, &input_state);
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 

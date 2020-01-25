@@ -581,6 +581,9 @@ impl HalState {
             unsafe { self.device.destroy_descriptor_set_layout(layout) }
         }
 
+        self.vertices.free(&self.device);
+        self.indices.free(&self.device);
+
         unsafe {
             self.device
                 .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&self.command_pool)));

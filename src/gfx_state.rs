@@ -145,8 +145,10 @@ impl GfxState {
             unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
                 .map_err(|_| "Could not create swapchain")?;
 
-        // Collection of subpasses,
-        // defines which attachment will be written
+        // A render pass is collection of subpasses describing
+        // the type of images used during rendering operations,
+        // how they will be used,
+        // and the treatment of their contents
         let render_pass = unsafe {
             device.create_render_pass(
                 &[
@@ -193,8 +195,8 @@ impl GfxState {
                         FORMAT,
                         Swizzle::NO,
                         SubresourceRange {
-                            // Image format properties that further specify the format,
-                            // especially if the format is ambiguous
+                            // Properties that further specify the image format,
+                            // especially if it is ambiguous
                             aspects: Aspects::COLOR,
                             // Mipmaps
                             levels: 0..1,
@@ -207,8 +209,8 @@ impl GfxState {
             })
             .collect::<Result<Vec<_>, &str>>()?;
 
-        // A framebuffer defines which image view
-        // is to be which attachment
+        // Where a render pass describes the types of image attachments,
+        // a framebuffer binds specific images to its attachements
         let framebuffers = image_views
             .iter()
             .map(|view| {

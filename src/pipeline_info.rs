@@ -1,23 +1,7 @@
 use gfx_backend_vulkan as back;
-use gfx_hal::{
-    device::Device,
-    format::Format,
-    pass::Subpass,
-    pso::{
-        AttributeDesc, BakedStates, BasePipeline, BlendDesc, BlendState, ColorBlendDesc, ColorMask,
-        DepthStencilDesc, DescriptorSetLayoutBinding, Element, EntryPoint, GraphicsPipelineDesc,
-        GraphicsShaderSet, InputAssemblerDesc, LogicOp, PipelineCreationFlags, Primitive,
-        Rasterizer, Rect, ShaderStageFlags, Specialization, VertexBufferDesc, VertexInputRate,
-        Viewport,
-    },
-    Backend,
-};
+use gfx_hal::{device::Device, format::Format, pass::Subpass, pso, Backend};
 use shaderc::{Compiler, ShaderKind};
-use std::{
-    mem::{self, ManuallyDrop},
-    ops::Range,
-    ptr,
-};
+use std::{mem::ManuallyDrop, ops::Range};
 
 pub struct PipelineInfo {
     pub descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout>,
@@ -25,16 +9,22 @@ pub struct PipelineInfo {
     pub handle: ManuallyDrop<<back::Backend as Backend>::GraphicsPipeline>,
 }
 
+// A pipeline describes all configurable and programmable state on the GPU
 impl PipelineInfo {
     pub fn new(
         device: &back::Device,
         subpass: Subpass<back::Backend>,
-        content_size: Rect,
+        content_size: pso::Rect,
     ) -> Result<Self, &'static str> {
-        let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
-        let mut compile = |src, kind| compile_shader(src, &mut compiler, &device, kind);
-        let vert = compile("shaders/vert.glsl", ShaderKind::Vertex)?;
-        let frag = compile("shaders/frag.glsl", ShaderKind::Fragment)?;
+        use std::mem::size_of;
+
+        let (vert, frag) = {
+            let mut compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
+            let mut compile = |src, kind| compile_shader(src, &mut compiler, &device, kind);
+            let vert = compile("shaders/vert.glsl", ShaderKind::Vertex)?;
+            let frag = compile("shaders/frag.glsl", ShaderKind::Fragment)?;
+            (vert, frag)
+        };
 
         // This machinery is only used when graphics pipeline data
         // comes from somewhere other than the vertex buffer.
@@ -43,7 +33,7 @@ impl PipelineInfo {
         let descriptor_set_layouts: Vec<<back::Backend as Backend>::DescriptorSetLayout> =
             vec![unsafe {
                 device.create_descriptor_set_layout(
-                    Vec::<DescriptorSetLayoutBinding>::new(),
+                    Vec::<pso::DescriptorSetLayoutBinding>::new(),
                     Vec::<<back::Backend as Backend>::Sampler>::new(),
                 )
             }
@@ -52,89 +42,92 @@ impl PipelineInfo {
         let layout = unsafe {
             device.create_pipeline_layout(
                 &descriptor_set_layouts,
-                Vec::<(ShaderStageFlags, Range<u32>)>::new(),
+                Vec::<(pso::ShaderStageFlags, Range<u32>)>::new(),
             )
         }
         .map_err(|_| "Failed to create a pipeline layout")?;
 
-        let pipeline_desc = GraphicsPipelineDesc {
-            shaders: GraphicsShaderSet::<back::Backend> {
-                vertex: EntryPoint {
-                    entry: "main",
-                    module: &vert,
-                    // Not sure what this is used for
-                    specialization: Specialization::EMPTY,
+        let handle = unsafe {
+            device.create_graphics_pipeline(
+                &pso::GraphicsPipelineDesc {
+                    shaders: pso::GraphicsShaderSet::<back::Backend> {
+                        vertex: pso::EntryPoint {
+                            entry: "main",
+                            module: &vert,
+                            // Not sure what this is used for
+                            specialization: pso::Specialization::EMPTY,
+                        },
+                        domain: None,
+                        geometry: None,
+                        hull: None,
+                        fragment: Some(pso::EntryPoint {
+                            entry: "main",
+                            module: &frag,
+                            specialization: pso::Specialization::EMPTY,
+                        }),
+                    },
+
+                    vertex_buffers: vec![pso::VertexBufferDesc {
+                        // Not the location listed on the shader,
+                        // this is just a unique id for the buffer
+                        binding: 0,
+                        stride: (size_of::<f32>() * 2) as u32,
+                        rate: pso::VertexInputRate::Vertex,
+                    }],
+
+                    attributes: vec![pso::AttributeDesc {
+                        // This is the attribute location in the shader
+                        location: 0,
+                        // Matches vertex buffer description
+                        binding: 0,
+                        element: pso::Element {
+                            // Float vec2
+                            format: Format::Rg32Sfloat,
+                            offset: 0,
+                        },
+                    }],
+
+                    input_assembler: pso::InputAssemblerDesc {
+                        primitive: pso::Primitive::TriangleList,
+                        with_adjacency: false,
+                        restart_index: None,
+                    },
+
+                    blender: pso::BlendDesc {
+                        logic_op: Some(pso::LogicOp::Copy),
+                        targets: vec![pso::ColorBlendDesc {
+                            mask: pso::ColorMask::ALL,
+                            blend: Some(pso::BlendState::ALPHA),
+                        }],
+                    },
+
+                    depth_stencil: pso::DepthStencilDesc {
+                        depth: None,
+                        depth_bounds: false,
+                        stencil: None,
+                    },
+
+                    multisampling: None,
+                    baked_states: pso::BakedStates {
+                        viewport: Some(pso::Viewport {
+                            rect: content_size,
+                            depth: 0.0..1.0,
+                        }),
+                        scissor: Some(content_size),
+                        blend_color: None,
+                        depth_bounds: None,
+                    },
+
+                    rasterizer: pso::Rasterizer::FILL,
+                    layout: &layout,
+                    subpass: subpass,
+                    flags: pso::PipelineCreationFlags::empty(),
+                    parent: pso::BasePipeline::None,
                 },
-                domain: None,
-                geometry: None,
-                hull: None,
-                fragment: Some(EntryPoint {
-                    entry: "main",
-                    module: &frag,
-                    specialization: Specialization::EMPTY,
-                }),
-            },
-
-            vertex_buffers: vec![VertexBufferDesc {
-                // Not the location listed on the shader,
-                // this is just a unique id for the buffer
-                binding: 0,
-                stride: (mem::size_of::<f32>() * 2) as u32,
-                rate: VertexInputRate::Vertex,
-            }],
-
-            attributes: vec![AttributeDesc {
-                // This is the attribute location in the shader
-                location: 0,
-                // Matches vertex buffer description
-                binding: 0,
-                element: Element {
-                    // Float vec2
-                    format: Format::Rg32Sfloat,
-                    offset: 0,
-                },
-            }],
-
-            input_assembler: InputAssemblerDesc {
-                primitive: Primitive::TriangleList,
-                with_adjacency: false,
-                restart_index: None,
-            },
-
-            blender: BlendDesc {
-                logic_op: Some(LogicOp::Copy),
-                targets: vec![ColorBlendDesc {
-                    mask: ColorMask::ALL,
-                    blend: Some(BlendState::ALPHA),
-                }],
-            },
-
-            depth_stencil: DepthStencilDesc {
-                depth: None,
-                depth_bounds: false,
-                stencil: None,
-            },
-
-            multisampling: None,
-            baked_states: BakedStates {
-                viewport: Some(Viewport {
-                    rect: content_size,
-                    depth: 0.0..1.0,
-                }),
-                scissor: Some(content_size),
-                blend_color: None,
-                depth_bounds: None,
-            },
-
-            rasterizer: Rasterizer::FILL,
-            layout: &layout,
-            subpass: subpass,
-            flags: PipelineCreationFlags::empty(),
-            parent: BasePipeline::None,
-        };
-
-        let handle = unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
-            .map_err(|_| "Failed to create graphics pipeline")?;
+                None,
+            )
+        }
+        .map_err(|_| "Failed to create graphics pipeline")?;
 
         unsafe {
             // Not needed after pipeline is built
@@ -150,13 +143,15 @@ impl PipelineInfo {
     }
 
     pub fn free(&mut self, device: &back::Device) {
+        use std::ptr::read;
+
         for layout in self.descriptor_set_layouts.drain(..) {
             unsafe { device.destroy_descriptor_set_layout(layout) }
         }
 
         unsafe {
-            device.destroy_pipeline_layout(ManuallyDrop::into_inner(ptr::read(&self.layout)));
-            device.destroy_graphics_pipeline(ManuallyDrop::into_inner(ptr::read(&self.handle)));
+            device.destroy_pipeline_layout(ManuallyDrop::into_inner(read(&self.layout)));
+            device.destroy_graphics_pipeline(ManuallyDrop::into_inner(read(&self.handle)));
         }
     }
 }

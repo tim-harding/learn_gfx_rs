@@ -6,20 +6,16 @@ use gfx_hal::{
     buffer::Usage,
     command::Level,
     device::Device,
-    format::{Aspects, Format, Swizzle},
-    image::{Extent, SubresourceRange, ViewKind},
-    pass::{
-        self, Attachment, AttachmentLayout, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp,
-        SubpassDesc,
-    },
+    format::{self, Format},
+    image,
+    pass::{self, AttachmentLayout, AttachmentOps},
     pool::{CommandPool, CommandPoolCreateFlags},
     pso::Rect,
     queue::family::{QueueFamily, QueueGroup},
-    window::{Extent2D, PresentMode, Surface, SwapchainConfig},
+    window::{self, Surface},
     Backend, Features, Instance,
 };
-use std::{mem::ManuallyDrop, ops::Drop};
-use winit::window::Window;
+use std::mem::ManuallyDrop;
 
 const FORMAT: Format = Format::Rgba8Srgb;
 
@@ -47,7 +43,7 @@ pub struct GfxState {
 }
 
 impl GfxState {
-    pub fn new(window: &Window) -> Result<Self, &'static str> {
+    pub fn new(window: &winit::window::Window) -> Result<Self, &'static str> {
         // Backend handle
         let instance =
             back::Instance::create(utils::WINDOW_NAME, 1).map_err(|_| "Unsupported backend")?;
@@ -68,34 +64,38 @@ impl GfxState {
             })
             .ok_or("No adapter supporting Vulkan")?;
 
-        // A set of queues with identical properties
-        let queue_family = adapter
-            .queue_families
-            .iter()
-            .find(|qf| qf.queue_type().supports_graphics() && surface.supports_queue_family(qf))
-            .ok_or("No queue family with graphics.")?;
+        let (device, queue_group) = {
+            // A set of queues with identical properties
+            let queue_family = adapter
+                .queue_families
+                .iter()
+                .find(|qf| qf.queue_type().supports_graphics() && surface.supports_queue_family(qf))
+                .ok_or("No queue family with graphics.")?;
 
-        // The adapter's underlying device
-        let gpu = unsafe {
-            adapter
-                .physical_device
-                // Request graphics queue with full priority and core features only
-                .open(&[(queue_family, &[1.0f32])], Features::empty())
-        }
-        .map_err(|_| "Could not open physical device")?;
+            // The adapter's underlying device
+            let gpu = unsafe {
+                adapter
+                    .physical_device
+                    // Request graphics queue with full priority and core features only
+                    .open(&[(queue_family, &[1.0f32])], Features::empty())
+            }
+            .map_err(|_| "Could not open physical device")?;
 
-        // Take ownership of contents so the gpu can go
-        // out of scope while the queue group lives on
-        let Gpu {
-            device,
-            queue_groups,
-        } = gpu;
+            // Take ownership of contents so the gpu can go
+            // out of scope while the queue group lives on
+            let Gpu {
+                device,
+                queue_groups,
+            } = gpu;
 
-        // Queue group contains queues matching the queue family
-        let queue_group = queue_groups
-            .into_iter()
-            .find(|qg| qg.family == queue_family.id())
-            .ok_or("Matching queue group not found")?;
+            // Queue group contains queues matching the queue family
+            let queue_group = queue_groups
+                .into_iter()
+                .find(|qg| qg.family == queue_family.id())
+                .ok_or("Matching queue group not found")?;
+
+            (device, queue_group)
+        };
 
         if !queue_group.queues.is_empty() {
             Ok(())
@@ -104,19 +104,52 @@ impl GfxState {
         }?;
 
         let content_size = window.inner_size();
-        let content_size = Extent2D {
+        let content_size = window::Extent2D {
             width: content_size.width,
             height: content_size.height,
         };
-        let capabilities = surface.capabilities(&adapter.physical_device);
-        let swapchain_config = SwapchainConfig::from_caps(&capabilities, FORMAT, content_size)
-            .with_present_mode(PresentMode::MAILBOX);
 
-        // Swapchain manages a collection of images
-        // Backbuffer contains handles to swapchain image memory
-        let (swapchain, backbuffer) =
-            unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
-                .map_err(|_| "Could not create swapchain")?;
+        let swapchain_config = {
+            let capabilities = surface.capabilities(&adapter.physical_device);
+            window::SwapchainConfig::from_caps(&capabilities, FORMAT, content_size)
+                .with_present_mode(window::PresentMode::MAILBOX)
+        };
+
+        let (swapchain, image_views) = {
+            // Swapchain manages a collection of images
+            // Backbuffer contains handles to swapchain image memory
+            let (swapchain, backbuffer) =
+                unsafe { device.create_swapchain(&mut surface, swapchain_config, None) }
+                    .map_err(|_| "Could not create swapchain")?;
+
+            // Describe access to the underlying image memory,
+            // possibly a subregion
+            let image_views = backbuffer
+                .into_iter()
+                .map(|image| {
+                    unsafe {
+                        device.create_image_view(
+                            &image,
+                            image::ViewKind::D2,
+                            FORMAT,
+                            format::Swizzle::NO,
+                            image::SubresourceRange {
+                                // Properties that further specify the image format,
+                                // especially if it is ambiguous
+                                aspects: format::Aspects::COLOR,
+                                // Mipmaps
+                                levels: 0..1,
+                                // Image array layers
+                                layers: 0..1,
+                            },
+                        )
+                    }
+                    .map_err(|_| "Could not create a backbuffer image view")
+                })
+                .collect::<Result<Vec<_>, &str>>()?;
+
+            (swapchain, image_views)
+        };
 
         // A render pass is collection of subpasses describing
         // the type of images used during rendering operations,
@@ -127,12 +160,15 @@ impl GfxState {
                 &[
                     // Describes a render target,
                     // to be attached as input or output
-                    Attachment {
+                    pass::Attachment {
                         format: Some(FORMAT),
                         // Don't have MSAA yet anyway
                         samples: 1,
                         // Clear the render target to the clear color and preserve the result
-                        ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
+                        ops: AttachmentOps::new(
+                            pass::AttachmentLoadOp::Clear,
+                            pass::AttachmentStoreOp::Store,
+                        ),
                         stencil_ops: AttachmentOps::DONT_CARE,
                         // Begin uninitialized, end ready to present
                         layouts: AttachmentLayout::Undefined..AttachmentLayout::Present,
@@ -140,7 +176,7 @@ impl GfxState {
                 ],
                 &[
                     // Render pass stage, distinct from multipass rendering
-                    SubpassDesc {
+                    pass::SubpassDesc {
                         // Zero is color attachment ID
                         colors: &[(0, AttachmentLayout::ColorAttachmentOptimal)],
                         depth_stencil: None,
@@ -156,32 +192,6 @@ impl GfxState {
         }
         .map_err(|_| "Could not create render pass")?;
 
-        // Describe access to the underlying image memory,
-        // possibly a subregion
-        let image_views = backbuffer
-            .into_iter()
-            .map(|image| {
-                unsafe {
-                    device.create_image_view(
-                        &image,
-                        ViewKind::D2,
-                        FORMAT,
-                        Swizzle::NO,
-                        SubresourceRange {
-                            // Properties that further specify the image format,
-                            // especially if it is ambiguous
-                            aspects: Aspects::COLOR,
-                            // Mipmaps
-                            levels: 0..1,
-                            // Image array layers
-                            layers: 0..1,
-                        },
-                    )
-                }
-                .map_err(|_| "Could not create a backbuffer image view")
-            })
-            .collect::<Result<Vec<_>, &str>>()?;
-
         // Where a render pass describes the types of image attachments,
         // a framebuffer binds specific images to its attachements
         let framebuffers = image_views
@@ -192,7 +202,7 @@ impl GfxState {
                     device.create_framebuffer(
                         &render_pass,
                         view_vec,
-                        Extent {
+                        image::Extent {
                             width: content_size.width,
                             height: content_size.height,
                             // Layers
@@ -301,7 +311,7 @@ impl GfxState {
     }
 }
 
-impl Drop for GfxState {
+impl std::ops::Drop for GfxState {
     fn drop(&mut self) {
         self.free()
     }

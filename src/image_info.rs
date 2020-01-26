@@ -11,9 +11,9 @@ pub struct ImageInfo {
 }
 
 impl ImageInfo {
-    pub fn new(device: &back::Device) -> Result<(), &'static str> {
+    pub fn new(_device: &back::Device) -> Result<(), &'static str> {
         Ok(())
     }
 
-    pub fn free(&mut self, device: &back::Device) {}
+    pub fn free(&mut self, _device: &back::Device) {}
 }

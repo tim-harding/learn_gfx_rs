@@ -1,13 +1,10 @@
-use crate::{
-    utils::{self, Vec2},
-    BufferInfo, PipelineInfo,
-};
+use crate::{utils, BufferInfo, PipelineInfo};
 use arrayvec::ArrayVec;
 use gfx_backend_vulkan as back;
 use gfx_hal::{
     adapter::{Gpu, PhysicalDevice},
-    buffer::{IndexBufferView, Usage},
-    command::{ClearColor, ClearValue, CommandBuffer, CommandBufferFlags, Level, SubpassContents},
+    buffer::Usage,
+    command::Level,
     device::Device,
     format::{Aspects, Format, Swizzle},
     image::{Extent, SubresourceRange, ViewKind},
@@ -16,61 +13,37 @@ use gfx_hal::{
         SubpassDesc,
     },
     pool::{CommandPool, CommandPoolCreateFlags},
-    pso::{PipelineStage, Rect, ShaderStageFlags},
-    queue::{
-        family::{QueueFamily, QueueGroup},
-        CommandQueue, Submission,
-    },
-    window::{Extent2D, PresentMode, Surface, Swapchain, SwapchainConfig},
-    Backend, Features, IndexType, Instance,
+    pso::Rect,
+    queue::family::{QueueFamily, QueueGroup},
+    window::{Extent2D, PresentMode, Surface, SwapchainConfig},
+    Backend, Features, Instance,
 };
-use std::{
-    mem::{self, ManuallyDrop},
-    ops::Drop,
-    ptr,
-};
+use std::{mem::ManuallyDrop, ops::Drop};
 use winit::window::Window;
 
-#[rustfmt::skip]
-const QUAD_DATA: [f32; 8] = [
-    -0.5, -0.5, 
-    -0.5,  0.5, 
-     0.5,  0.5, 
-     0.5, -0.5, 
-];
-
-#[rustfmt::skip]
-const QUAD_INDICES: [u16; 6] = [
-    0, 1, 2,
-    0, 2, 3,
-];
-
-// Matches mailbox presentation, which
-// uses three images for vsync
-const FRAMES_IN_FLIGHT: usize = 3;
 const FORMAT: Format = Format::Rgba8Srgb;
 
 pub struct GfxState {
-    current_frame: usize,
-    content_size: Rect,
+    pub current_frame: usize,
+    pub content_size: Rect,
 
-    device: back::Device,
-    queue_group: QueueGroup<back::Backend>,
+    pub device: back::Device,
+    pub queue_group: QueueGroup<back::Backend>,
 
-    in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
-    render_finished_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
-    image_available_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
-    command_buffers: Vec<<back::Backend as Backend>::CommandBuffer>,
-    framebuffers: Vec<<back::Backend as Backend>::Framebuffer>,
-    image_views: Vec<<back::Backend as Backend>::ImageView>,
+    pub in_flight_fences: Vec<<back::Backend as Backend>::Fence>,
+    pub render_finished_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
+    pub image_available_semaphores: Vec<<back::Backend as Backend>::Semaphore>,
+    pub command_buffers: Vec<<back::Backend as Backend>::CommandBuffer>,
+    pub framebuffers: Vec<<back::Backend as Backend>::Framebuffer>,
+    pub image_views: Vec<<back::Backend as Backend>::ImageView>,
 
-    command_pool: ManuallyDrop<<back::Backend as Backend>::CommandPool>,
-    render_pass: ManuallyDrop<<back::Backend as Backend>::RenderPass>,
-    swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
+    pub command_pool: ManuallyDrop<<back::Backend as Backend>::CommandPool>,
+    pub render_pass: ManuallyDrop<<back::Backend as Backend>::RenderPass>,
+    pub swapchain: ManuallyDrop<<back::Backend as Backend>::Swapchain>,
 
-    pipeline: PipelineInfo,
-    vertices: BufferInfo,
-    indices: BufferInfo,
+    pub pipeline: PipelineInfo,
+    pub vertices: BufferInfo,
+    pub indices: BufferInfo,
 }
 
 impl GfxState {
@@ -269,8 +242,8 @@ impl GfxState {
                 content_size,
             )?,
 
-            vertices: BufferInfo::new(&device, &adapter, &QUAD_DATA, Usage::VERTEX)?,
-            indices: BufferInfo::new(&device, &adapter, &QUAD_INDICES, Usage::INDEX)?,
+            vertices: BufferInfo::new(&device, &adapter, &utils::QUAD_DATA, Usage::VERTEX)?,
+            indices: BufferInfo::new(&device, &adapter, &utils::QUAD_INDICES, Usage::INDEX)?,
 
             command_pool: ManuallyDrop::new(command_pool),
             render_pass: ManuallyDrop::new(render_pass),
@@ -285,83 +258,9 @@ impl GfxState {
         })
     }
 
-    pub fn draw_frame(&mut self, color: [f32; 4], mouse: Vec2) -> Result<(), &'static str> {
-        let image_available = &self.image_available_semaphores[self.current_frame];
-        let render_finished = &self.render_finished_semaphores[self.current_frame];
-        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
-
-        let (image_i, _suboptimal) = unsafe {
-            self.swapchain
-                .acquire_image(core::u64::MAX, Some(image_available), None)
-        }
-        .map_err(|_| "Failed to acquire an image from the swapchain")?;
-        let image_i = image_i as usize;
-
-        let flight_fence = &self.in_flight_fences[image_i];
-        unsafe { self.device.wait_for_fence(flight_fence, core::u64::MAX) }
-            .map_err(|_| "Failed to wait on the fence")?;
-        unsafe { self.device.reset_fence(flight_fence) }
-            .map_err(|_| "Failed to reset the fence")?;
-
-        self.vertices.load_data(&self.device, &QUAD_DATA)?;
-        self.indices.load_data(&self.device, &QUAD_INDICES)?;
-
-        let commands = &mut self.command_buffers[image_i];
-        let buffers: ArrayVec<[_; 1]> = [(&*self.vertices.buffer, 0)].into();
-        unsafe {
-            commands.begin_primary(CommandBufferFlags::EMPTY);
-            commands.bind_graphics_pipeline(&self.pipeline.handle);
-            commands.bind_vertex_buffers(0, buffers);
-            commands.bind_index_buffer(IndexBufferView {
-                buffer: &self.indices.buffer,
-                offset: 0,
-                index_type: IndexType::U16,
-            });
-            commands.push_graphics_constants(
-                &self.pipeline.layout,
-                ShaderStageFlags::VERTEX,
-                0,
-                &[
-                    mem::transmute::<f32, u32>(mouse.x),
-                    mem::transmute::<f32, u32>(mouse.y),
-                ],
-            );
-            commands.begin_render_pass(
-                &self.render_pass,
-                &self.framebuffers[image_i],
-                self.content_size,
-                [ClearValue {
-                    color: ClearColor { float32: color },
-                }]
-                .iter(),
-                SubpassContents::Inline,
-            );
-            commands.draw_indexed(0..6, 0, 0..1);
-            commands.end_render_pass();
-            commands.finish();
-        }
-
-        let wait_semaphores: ArrayVec<[_; 1]> =
-            [(image_available, PipelineStage::COLOR_ATTACHMENT_OUTPUT)].into();
-        let signal_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
-        let submission = Submission {
-            command_buffers: &self.command_buffers.get(image_i),
-            wait_semaphores,
-            signal_semaphores,
-        };
-        let present_wait_semaphores: ArrayVec<[_; 1]> = [render_finished].into();
-        let command_queue = &mut self.queue_group.queues[0];
-        unsafe {
-            command_queue.submit(submission, Some(flight_fence));
-            self.swapchain
-                .present(command_queue, image_i as u32, present_wait_semaphores)
-        }
-        // Discard suboptimal warning
-        .map(|_| ())
-        .map_err(|_| "Failed to present into the swapchain")
-    }
-
     pub fn free(&mut self) {
+        use std::ptr::read;
+
         let _ = self.device.wait_idle();
 
         // Don't need to destroy command buffers,
@@ -393,11 +292,11 @@ impl GfxState {
 
         unsafe {
             self.device
-                .destroy_command_pool(ManuallyDrop::into_inner(ptr::read(&self.command_pool)));
+                .destroy_command_pool(ManuallyDrop::into_inner(read(&self.command_pool)));
             self.device
-                .destroy_render_pass(ManuallyDrop::into_inner(ptr::read(&self.render_pass)));
+                .destroy_render_pass(ManuallyDrop::into_inner(read(&self.render_pass)));
             self.device
-                .destroy_swapchain(ManuallyDrop::into_inner(ptr::read(&self.swapchain)));
+                .destroy_swapchain(ManuallyDrop::into_inner(read(&self.swapchain)));
         }
     }
 }
@@ -412,7 +311,7 @@ fn full_flight<T, F>(cb: F) -> Result<Vec<T>, &'static str>
 where
     F: Fn() -> Result<T, &'static str>,
 {
-    (0..FRAMES_IN_FLIGHT)
+    (0..utils::FRAMES_IN_FLIGHT)
         .map(|_| cb())
         .collect::<Result<Vec<_>, _>>()
 }

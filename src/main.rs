@@ -20,6 +20,8 @@ pub use pipeline_info::PipelineInfo;
 mod image_info;
 pub use image_info::ImageInfo;
 
+mod drawing;
+
 #[derive(Default, Copy, Clone)]
 struct InputState {
     pub mouse: Vec2,
@@ -96,7 +98,7 @@ fn main() -> Result<(), &'static str> {
 }
 
 fn render(gfx_state: &mut GfxState, input_state: &InputState) {
-    if let Err(e) = gfx_state.draw_frame([0.2, 0.2, 0.2, 1.0], input_state.mouse) {
+    if let Err(e) = drawing::draw_frame(gfx_state, [0.2, 0.2, 0.2, 1.0], input_state.mouse) {
         println!("{}", e);
     }
 }

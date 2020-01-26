@@ -62,7 +62,7 @@ impl BufferInfo {
             .map_err(|_| "Failed to memory map buffer")?;
 
         unsafe {
-            std::ptr::copy(data.as_ptr() as *const u8, mapped_memory, array_size(data));
+            ptr::copy(data.as_ptr() as *const u8, mapped_memory, array_size(data));
             device.unmap_memory(&self.memory)
         }
 

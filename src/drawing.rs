@@ -42,6 +42,9 @@ pub fn draw_frame(
         let commands = &mut state.command_buffers[image_i];
         let buffers: ArrayVec<[_; 1]> = [(&*state.vertices.buffer, 0)].into();
         unsafe {
+            // A primary command buffer may optionally call into
+            // secondary command buffers, which are usually prerecorded
+            // steps the primary buffer can reuse or switch between
             commands.begin_primary(command::CommandBufferFlags::EMPTY);
             commands.bind_graphics_pipeline(&state.pipeline.handle);
             commands.bind_vertex_buffers(0, buffers);
@@ -59,6 +62,8 @@ pub fn draw_frame(
                     mem::transmute::<f32, u32>(mouse.y),
                 ],
             );
+            // A renderpass is a bunch of work done with a
+            // particular set of attachments. 
             commands.begin_render_pass(
                 &state.render_pass,
                 &state.framebuffers[image_i],
@@ -69,6 +74,14 @@ pub fn draw_frame(
                 .iter(),
                 command::SubpassContents::Inline,
             );
+            // Subpasses may change attachment behaviour,
+            // for example changing intermediate buffers 
+            // from write to read in the case of 
+            // deferred rendering. Subpasses are also likely
+            // to be faster, and their use is preferrable where
+            // limitations don't restrict their use. Each pixel of output
+            // can only read its corresponding pixel of input, 
+            // so things like blur are not possible within subpasses.
             commands.draw_indexed(0..6, 0, 0..1);
             commands.end_render_pass();
             commands.finish();
